@@ -1,0 +1,19 @@
+<configuration>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- REPL mode: suppress DEBUG noise so SQL output is readable -->
+    <!-- Change to DEBUG when you need to trace internals -->
+    <root level="WARN">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+
+    <!-- Uncomment this to see internal debug traces:
+    <logger name="dev.koradb" level="DEBUG"/>
+    -->
+
+</configuration>
