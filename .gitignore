@@ -1,0 +1,29 @@
+# Compiled output
+target/
+*.class
+
+# Maven
+.mvn/
+!.mvn/wrapper/maven-wrapper.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.code-workspace
+.classpath
+.project
+.settings/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# KoraDB data files (added in M2)
+*.kdb
+*.wal
+data/
