@@ -111,7 +111,7 @@ public final class Parser {
     // =========================================================================
 
     /**
-     * Dispatches CREATE DATABASE | CREATE TABLE.
+     * Dispatches CREATE DATABASE | CREATE TABLE | CREATE INDEX | CREATE UNIQUE INDEX.
      */
     private Statement parseCreate() {
         consume(CREATE, "CREATE");
@@ -120,10 +120,32 @@ public final class Parser {
         return switch (next.type()) {
             case DATABASE -> parseCreateDatabase();
             case TABLE    -> parseCreateTable();
+            case INDEX    -> parseCreateIndex(false);
+            case UNIQUE   -> {
+                advance(); // consume UNIQUE
+                consume(INDEX, "INDEX");
+                yield parseCreateIndex(true);
+            }
             default       -> throw new ParseException(
-                    "Expected DATABASE or TABLE after CREATE, found: '" + next.lexeme() + "'",
+                    "Expected DATABASE, TABLE, or INDEX after CREATE, found: '" + next.lexeme() + "'",
                     next.line());
         };
+    }
+
+    /**
+     * {@code CREATE [UNIQUE] INDEX <name> ON <tableName> ( <colName> )}
+     */
+    private CreateIndexStmt parseCreateIndex(boolean unique) {
+        if (!unique) {
+            consume(INDEX, "INDEX");
+        }
+        String indexName = consumeIdentifier("index name");
+        consume(ON, "ON");
+        String tableName = consumeIdentifier("table name");
+        consume(LPAREN, "(");
+        String columnName = consumeIdentifier("column name");
+        consume(RPAREN, ")");
+        return new CreateIndexStmt(indexName, tableName, columnName, unique);
     }
 
     /**
@@ -201,8 +223,9 @@ public final class Parser {
         return switch (next.type()) {
             case DATABASE -> parseDropDatabase();
             case TABLE    -> parseDropTable();
+            case INDEX    -> parseDropIndex();
             default       -> throw new ParseException(
-                    "Expected DATABASE or TABLE after DROP, found: '" + next.lexeme() + "'",
+                    "Expected DATABASE, TABLE, or INDEX after DROP, found: '" + next.lexeme() + "'",
                     next.line());
         };
     }
@@ -217,6 +240,20 @@ public final class Parser {
         consume(TABLE, "TABLE");
         String name = consumeIdentifier("table name");
         return new DropTableStmt(name);
+    }
+
+    /**
+     * {@code DROP INDEX <indexName> [ON <tableName>]}
+     */
+    private DropIndexStmt parseDropIndex() {
+        consume(INDEX, "INDEX");
+        String indexName = consumeIdentifier("index name");
+        String tableName = null;
+        if (check(ON)) {
+            advance();
+            tableName = consumeIdentifier("table name");
+        }
+        return new DropIndexStmt(indexName, tableName);
     }
 
     // =========================================================================

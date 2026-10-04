@@ -194,8 +194,11 @@ public final class TableFile implements AutoCloseable {
     public Row readRow(RecordId rid) {
         BufferFrame frame = bufferPool.pin(rid.pageId());
         try {
-            SlottedPage sp     = new SlottedPage(frame.getPage());
-            byte[]      record = sp.getRecord(rid.slotIndex());
+            SlottedPage sp = new SlottedPage(frame.getPage());
+            if (!sp.isAlive(rid.slotIndex())) {
+                return null;
+            }
+            byte[] record = sp.getRecord(rid.slotIndex());
             return serializer.deserialize(record);
         } finally {
             bufferPool.unpin(frame);

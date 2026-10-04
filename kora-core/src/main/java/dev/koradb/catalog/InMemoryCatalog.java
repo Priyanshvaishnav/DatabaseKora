@@ -1,9 +1,11 @@
 package dev.koradb.catalog;
 
 import dev.koradb.exception.SchemaException;
+import dev.koradb.sql.ast.DataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -138,5 +140,143 @@ public final class InMemoryCatalog implements Catalog {
     @Override
     public List<Table> listTables() {
         return requireCurrentDatabase().listTables();
+    }
+
+    // =========================================================================
+    // Index management
+    // =========================================================================
+
+    private final Map<String, dev.koradb.index.Index> indexes = new LinkedHashMap<>();
+
+    @Override
+    public void createIndex(String indexName, String tableName, String columnName, boolean unique) {
+        Table table = getTable(tableName);
+        if (!table.getSchema().hasColumn(columnName)) {
+            throw new SchemaException("Column '%s' does not exist in table '%s'".formatted(columnName, tableName));
+        }
+        if (indexes.containsKey(indexName.toLowerCase())) {
+            throw new SchemaException("Index '%s' already exists".formatted(indexName));
+        }
+
+        DataType colType = table.getSchema().findColumn(columnName).dataType();
+        InMemoryIndex idx = new InMemoryIndex(indexName, tableName, columnName, colType, unique);
+
+        // Populate with existing rows
+        List<Row> rows = table.getRows();
+        for (int i = 0; i < rows.size(); i++) {
+            Row r = rows.get(i);
+            Object val = r.get(columnName);
+            if (val != null) {
+                idx.insert(new dev.koradb.index.IndexKey(val, colType), new dev.koradb.storage.RecordId(0, i));
+            }
+        }
+
+        indexes.put(indexName.toLowerCase(), idx);
+        log.debug("Created in-memory index '{}' on {}({})", indexName, tableName, columnName);
+    }
+
+    @Override
+    public void dropIndex(String indexName) {
+        if (indexes.remove(indexName.toLowerCase()) == null) {
+            throw new SchemaException("Index '%s' does not exist".formatted(indexName));
+        }
+        log.debug("Dropped in-memory index '{}'", indexName);
+    }
+
+    @Override
+    public Optional<dev.koradb.index.Index> getIndex(String indexName) {
+        return Optional.ofNullable(indexes.get(indexName.toLowerCase()));
+    }
+
+    @Override
+    public Optional<dev.koradb.index.Index> getIndexForColumn(String tableName, String columnName) {
+        return indexes.values().stream()
+                .filter(idx -> idx.getTableName().equalsIgnoreCase(tableName)
+                        && idx.getColumnName().equalsIgnoreCase(columnName))
+                .findFirst();
+    }
+
+    @Override
+    public List<dev.koradb.index.Index> getIndexesForTable(String tableName) {
+        return indexes.values().stream()
+                .filter(idx -> idx.getTableName().equalsIgnoreCase(tableName))
+                .toList();
+    }
+
+    private static class InMemoryIndex implements dev.koradb.index.Index {
+        private final String name;
+        private final String tableName;
+        private final String columnName;
+        private final DataType keyType;
+        private final boolean unique;
+        private final java.util.TreeMap<dev.koradb.index.IndexKey, List<dev.koradb.storage.RecordId>> map = new java.util.TreeMap<>();
+
+        public InMemoryIndex(String name, String tableName, String columnName, DataType keyType, boolean unique) {
+            this.name = name;
+            this.tableName = tableName;
+            this.columnName = columnName;
+            this.keyType = keyType;
+            this.unique = unique;
+        }
+
+        @Override public String getName() { return name; }
+        @Override public String getTableName() { return tableName; }
+        @Override public String getColumnName() { return columnName; }
+        @Override public DataType getKeyType() { return keyType; }
+        @Override public boolean isUnique() { return unique; }
+
+        @Override
+        public void insert(dev.koradb.index.IndexKey key, dev.koradb.storage.RecordId rid) {
+            if (unique && map.containsKey(key) && !map.get(key).isEmpty()) {
+                throw new dev.koradb.exception.StorageException("Unique index violation: duplicate key " + key);
+            }
+            map.computeIfAbsent(key, k -> new ArrayList<>()).add(rid);
+        }
+
+        @Override
+        public Optional<dev.koradb.storage.RecordId> search(dev.koradb.index.IndexKey key) {
+            List<dev.koradb.storage.RecordId> rids = map.get(key);
+            if (rids != null && !rids.isEmpty()) {
+                return Optional.of(rids.get(0));
+            }
+            return Optional.empty();
+        }
+
+        @Override
+        public List<dev.koradb.storage.RecordId> searchAll(dev.koradb.index.IndexKey key) {
+            return map.getOrDefault(key, List.of());
+        }
+
+        @Override
+        public List<dev.koradb.storage.RecordId> rangeScan(dev.koradb.index.IndexKey low, dev.koradb.index.IndexKey high, boolean lowInc, boolean highInc) {
+            List<dev.koradb.storage.RecordId> res = new ArrayList<>();
+            for (var entry : map.entrySet()) {
+                dev.koradb.index.IndexKey k = entry.getKey();
+                if (low != null) {
+                    int c = k.compareTo(low);
+                    if (c < 0 || (!lowInc && c == 0)) continue;
+                }
+                if (high != null) {
+                    int c = k.compareTo(high);
+                    if (c > 0 || (!highInc && c == 0)) break;
+                }
+                res.addAll(entry.getValue());
+            }
+            return res;
+        }
+
+        @Override
+        public boolean delete(dev.koradb.index.IndexKey key, dev.koradb.storage.RecordId rid) {
+            List<dev.koradb.storage.RecordId> rids = map.get(key);
+            if (rids != null) {
+                boolean rm = rid == null ? (rids.remove(0) != null) : rids.remove(rid);
+                if (rids.isEmpty()) map.remove(key);
+                return rm;
+            }
+            return false;
+        }
+
+        @Override public void flush() {}
+        @Override public void close() {}
     }
 }
