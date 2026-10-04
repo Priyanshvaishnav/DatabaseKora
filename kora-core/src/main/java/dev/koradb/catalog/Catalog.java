@@ -93,4 +93,37 @@ public interface Catalog {
 
     /** Returns all tables in the current database. */
     List<Table> listTables();
+
+    // -------------------------------------------------------------------------
+    // Index management
+    // -------------------------------------------------------------------------
+
+    /**
+     * Creates an index on the given table and column.
+     *
+     * @throws dev.koradb.exception.SchemaException if the index already exists or table/column not found
+     */
+    void createIndex(String indexName, String tableName, String columnName, boolean unique);
+
+    /**
+     * Drops an index by name from the current database.
+     *
+     * @throws dev.koradb.exception.SchemaException if the index does not exist
+     */
+    void dropIndex(String indexName);
+
+    /**
+     * Returns the index with the given name, or empty if not found.
+     */
+    java.util.Optional<dev.koradb.index.Index> getIndex(String indexName);
+
+    /**
+     * Returns the index defined on the given table and column, or empty if none exists.
+     */
+    java.util.Optional<dev.koradb.index.Index> getIndexForColumn(String tableName, String columnName);
+
+    /**
+     * Returns all indexes for a given table.
+     */
+    List<dev.koradb.index.Index> getIndexesForTable(String tableName);
 }

@@ -20,6 +20,7 @@ public enum TokenType {
     DATABASE,
     TABLE,
     INDEX,
+    UNIQUE,
     ON,
     USE,
 

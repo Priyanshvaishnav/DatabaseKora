@@ -380,6 +380,64 @@ class ParserTest {
     }
 
     // =========================================================================
+    // DDL — CREATE INDEX / DROP INDEX
+    // =========================================================================
+
+    @Nested
+    @DisplayName("CREATE INDEX")
+    class CreateIndex {
+
+        @Test
+        @DisplayName("parses CREATE INDEX")
+        void basicCreateIndex() {
+            Statement stmt = parse("CREATE INDEX idx_user_id ON users (id)");
+            assertThat(stmt).isInstanceOf(CreateIndexStmt.class);
+            CreateIndexStmt s = (CreateIndexStmt) stmt;
+            assertThat(s.indexName()).isEqualTo("idx_user_id");
+            assertThat(s.tableName()).isEqualTo("users");
+            assertThat(s.columnName()).isEqualTo("id");
+            assertThat(s.unique()).isFalse();
+        }
+
+        @Test
+        @DisplayName("parses CREATE UNIQUE INDEX")
+        void uniqueIndex() {
+            Statement stmt = parse("CREATE UNIQUE INDEX idx_email ON users (email);");
+            assertThat(stmt).isInstanceOf(CreateIndexStmt.class);
+            CreateIndexStmt s = (CreateIndexStmt) stmt;
+            assertThat(s.indexName()).isEqualTo("idx_email");
+            assertThat(s.tableName()).isEqualTo("users");
+            assertThat(s.columnName()).isEqualTo("email");
+            assertThat(s.unique()).isTrue();
+        }
+    }
+
+    @Nested
+    @DisplayName("DROP INDEX")
+    class DropIndex {
+
+        @Test
+        @DisplayName("parses DROP INDEX")
+        void basicDropIndex() {
+            Statement stmt = parse("DROP INDEX idx_user_id");
+            assertThat(stmt).isInstanceOf(DropIndexStmt.class);
+            DropIndexStmt s = (DropIndexStmt) stmt;
+            assertThat(s.indexName()).isEqualTo("idx_user_id");
+            assertThat(s.tableName()).isNull();
+        }
+
+        @Test
+        @DisplayName("parses DROP INDEX ON table")
+        void dropIndexOnTable() {
+            Statement stmt = parse("DROP INDEX idx_user_id ON users;");
+            assertThat(stmt).isInstanceOf(DropIndexStmt.class);
+            DropIndexStmt s = (DropIndexStmt) stmt;
+            assertThat(s.indexName()).isEqualTo("idx_user_id");
+            assertThat(s.tableName()).isEqualTo("users");
+        }
+    }
+
+    // =========================================================================
     // Error cases
     // =========================================================================
 

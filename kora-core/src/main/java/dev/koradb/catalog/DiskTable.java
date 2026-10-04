@@ -26,14 +26,16 @@ import java.util.List;
 public final class DiskTable extends Table {
 
     private final TableFile tableFile;
+    private final java.util.function.Supplier<List<dev.koradb.index.Index>> indexSupplier;
 
     public DiskTable(String name, TableFile tableFile) {
-        // Parent Table needs a Schema — but we won't use its in-memory rows
-        // The schema is accessible via tableFile's serializer's schema,
-        // but we need it here for the parent constructor.
-        // We reconstruct it lazily via a full scan.
+        this(name, tableFile, Collections::emptyList);
+    }
+
+    public DiskTable(String name, TableFile tableFile, java.util.function.Supplier<List<dev.koradb.index.Index>> indexSupplier) {
         super(name, extractSchema(tableFile));
         this.tableFile = tableFile;
+        this.indexSupplier = indexSupplier != null ? indexSupplier : Collections::emptyList;
     }
 
     // =========================================================================
@@ -50,12 +52,17 @@ public final class DiskTable extends Table {
     }
 
     /**
-     * Inserts a row into the disk store.
-     * The RecordId is returned but not currently used by the M2 executor.
+     * Inserts a row into the disk store and updates associated indexes.
      */
     @Override
     public void insertRow(Row row) {
-        tableFile.insertRow(row);
+        RecordId rid = tableFile.insertRow(row);
+        for (dev.koradb.index.Index idx : indexSupplier.get()) {
+            Object val = row.get(idx.getColumnName());
+            if (val != null) {
+                idx.insert(new dev.koradb.index.IndexKey(val, idx.getKeyType()), rid);
+            }
+        }
     }
 
     /**

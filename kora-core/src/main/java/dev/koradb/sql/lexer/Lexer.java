@@ -43,6 +43,7 @@ public final class Lexer {
             Map.entry("DATABASE",  TokenType.DATABASE),
             Map.entry("TABLE",     TokenType.TABLE),
             Map.entry("INDEX",     TokenType.INDEX),
+            Map.entry("UNIQUE",    TokenType.UNIQUE),
             Map.entry("ON",        TokenType.ON),
             Map.entry("USE",       TokenType.USE),
             Map.entry("INSERT",    TokenType.INSERT),

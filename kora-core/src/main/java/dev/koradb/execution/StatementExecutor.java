@@ -50,6 +50,8 @@ public final class StatementExecutor {
             case UseDatabaseStmt    s -> executeUseDatabase(s, catalog);
             case CreateTableStmt    s -> executeCreateTable(s, catalog);
             case DropTableStmt      s -> executeDropTable(s, catalog);
+            case CreateIndexStmt    s -> executeCreateIndex(s, catalog);
+            case DropIndexStmt      s -> executeDropIndex(s, catalog);
             case InsertStmt         s -> executeInsert(s, catalog);
             case SelectStmt         s -> executeSelect(s, catalog);
             case UpdateStmt         s -> executeUpdate(s, catalog);
@@ -90,6 +92,18 @@ public final class StatementExecutor {
     private QueryResult executeDropTable(DropTableStmt stmt, Catalog catalog) {
         catalog.dropTable(stmt.tableName());
         log.info("Table '{}' dropped", stmt.tableName());
+        return QueryResult.ddl();
+    }
+
+    private QueryResult executeCreateIndex(CreateIndexStmt stmt, Catalog catalog) {
+        catalog.createIndex(stmt.indexName(), stmt.tableName(), stmt.columnName(), stmt.unique());
+        log.info("Index '{}' created on {}({})", stmt.indexName(), stmt.tableName(), stmt.columnName());
+        return QueryResult.ddl();
+    }
+
+    private QueryResult executeDropIndex(DropIndexStmt stmt, Catalog catalog) {
+        catalog.dropIndex(stmt.indexName());
+        log.info("Index '{}' dropped", stmt.indexName());
         return QueryResult.ddl();
     }
 
@@ -146,10 +160,8 @@ public final class StatementExecutor {
             }
         }
 
-        // Filter
-        List<Row> filtered = table.getRows().stream()
-                .filter(row -> matchesWhere(row, stmt.where(), evaluator))
-                .toList();
+        // Filter using index if applicable, otherwise table scan
+        List<Row> filtered = fetchFilteredRows(table, stmt, evaluator, catalog);
 
         // Project
         List<Row> projected = filtered.stream()
@@ -158,6 +170,51 @@ public final class StatementExecutor {
 
         log.debug("SELECT returned {} row(s) from '{}'", projected.size(), stmt.tableName());
         return QueryResult.select(projected, projectedCols);
+    }
+
+    private List<Row> fetchFilteredRows(Table table, SelectStmt stmt, ExpressionEvaluator evaluator, Catalog catalog) {
+        if (stmt.where().isPresent() && table instanceof dev.koradb.catalog.DiskTable diskTable) {
+            for (BinaryExpr bin : stmt.where().get().predicates()) {
+                if (bin.operator() == Operator.EQ) {
+                    String col = null;
+                    Object val = null;
+                    if (bin.left() instanceof ColumnRefExpr cref && bin.right() instanceof LiteralExpr lit) {
+                        col = cref.columnName();
+                        val = lit.value();
+                    } else if (bin.right() instanceof ColumnRefExpr cref && bin.left() instanceof LiteralExpr lit) {
+                        col = cref.columnName();
+                        val = lit.value();
+                    }
+
+                    if (col != null && val != null) {
+                        var indexOpt = catalog.getIndexForColumn(stmt.tableName(), col);
+                        if (indexOpt.isPresent()) {
+                            var index = indexOpt.get();
+                            Object coercedVal = coerce(val, index.getKeyType(), col);
+                            var key = new dev.koradb.index.IndexKey(coercedVal, index.getKeyType());
+                            List<dev.koradb.storage.RecordId> rids = index.isUnique()
+                                    ? index.search(key).map(List::of).orElse(List.of())
+                                    : index.searchAll(key);
+
+                            List<Row> rows = new ArrayList<>();
+                            for (dev.koradb.storage.RecordId rid : rids) {
+                                Row r = diskTable.getTableFile().readRow(rid);
+                                if (r != null && matchesWhere(r, stmt.where(), evaluator)) {
+                                    rows.add(r);
+                                }
+                            }
+                            log.debug("Index scan using '{}' matched {} row(s)", index.getName(), rows.size());
+                            return rows;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Full table scan fallback
+        return table.getRows().stream()
+                .filter(row -> matchesWhere(row, stmt.where(), evaluator))
+                .toList();
     }
 
     // =========================================================================
@@ -197,6 +254,18 @@ public final class StatementExecutor {
                         newVals.put(a.columnName(), typed);
                     }
                     tf.updateRow(rr.rid(), new Row(newVals));
+                    for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
+                        Object oldVal = rr.row().get(idx.getColumnName());
+                        Object newVal = newVals.get(idx.getColumnName());
+                        if (!java.util.Objects.equals(oldVal, newVal)) {
+                            if (oldVal != null) {
+                                idx.delete(new dev.koradb.index.IndexKey(oldVal, idx.getKeyType()), rr.rid());
+                            }
+                            if (newVal != null) {
+                                idx.insert(new dev.koradb.index.IndexKey(newVal, idx.getKeyType()), rr.rid());
+                            }
+                        }
+                    }
                     count++;
                 }
             }
@@ -240,6 +309,12 @@ public final class StatementExecutor {
             for (TableFile.RidRow rr : tf.scanWithRids()) {
                 if (matchesWhere(rr.row(), stmt.where(), evaluator)) {
                     tf.deleteRow(rr.rid());
+                    for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
+                        Object val = rr.row().get(idx.getColumnName());
+                        if (val != null) {
+                            idx.delete(new dev.koradb.index.IndexKey(val, idx.getKeyType()), rr.rid());
+                        }
+                    }
                     count++;
                 }
             }

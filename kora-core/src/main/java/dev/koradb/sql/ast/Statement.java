@@ -29,5 +29,7 @@ public sealed interface Statement
                 InsertStmt,
                 SelectStmt,
                 UpdateStmt,
-                DeleteStmt {
+                DeleteStmt,
+                CreateIndexStmt,
+                DropIndexStmt {
 }

@@ -1,9 +1,11 @@
 package dev.koradb.catalog;
 
+import dev.koradb.buffer.BufferPool;
 import dev.koradb.exception.SchemaException;
 import dev.koradb.exception.StorageException;
 import dev.koradb.sql.ast.ColumnDef;
 import dev.koradb.sql.ast.DataType;
+import dev.koradb.storage.DiskPageManager;
 import dev.koradb.storage.StorageConfig;
 import dev.koradb.storage.TableFile;
 import org.slf4j.Logger;
@@ -55,6 +57,9 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
 
     /** Cache of open TableFile handles — one per table in the current database. */
     private final Map<String, TableFile> openFiles = new LinkedHashMap<>();
+
+    /** Cache of open B+ Tree index handles — one per index in the current database. */
+    private final Map<String, dev.koradb.index.BPlusTree> openIndexes = new LinkedHashMap<>();
 
     private String currentDbName = null; // lowercase key
 
@@ -116,7 +121,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         requireDbDir(name, dbDir);
         // Reconstruct a Database object from disk
         Database db = new Database(name);
-        loadMeta(dbDir).forEach(db::addTable);
+        loadTablesMeta(dbDir).forEach(db::addTable);
         return db;
     }
 
@@ -142,13 +147,26 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     public void useDatabase(String name) {
         Path dbDir = dbDir(name);
         requireDbDir(name, dbDir);
+        closeOpenIndexes();
         closeOpenFiles();
         currentDbName = name.toLowerCase();
         // Pre-open TableFile handles for all existing tables
-        loadMeta(dbDir).forEach(table -> {
+        loadTablesMeta(dbDir).forEach(table -> {
             Path filePath = StorageConfig.tableFilePath(dbDir, table.getName());
             openFiles.put(table.getName().toLowerCase(),
                           new TableFile(table.getSchema(), filePath));
+        });
+        // Pre-open BPlusTree handles for all existing indexes
+        loadIndexesMeta(dbDir).forEach(meta -> {
+            Path idxPath = dbDir.resolve(meta.name().toLowerCase() + ".idx");
+            TableFile tf = openFiles.get(meta.tableName().toLowerCase());
+            if (tf != null && tf.getSchema().findColumn(meta.columnName()) != null) {
+                DataType keyType = tf.getSchema().findColumn(meta.columnName()).dataType();
+                DiskPageManager dpm = new DiskPageManager(idxPath);
+                BufferPool bp = new BufferPool(dpm);
+                openIndexes.put(meta.name().toLowerCase(),
+                        new dev.koradb.index.BPlusTree(meta.name(), meta.tableName(), meta.columnName(), keyType, meta.unique(), bp));
+            }
         });
         log.info("Using database '{}'", name);
     }
@@ -197,6 +215,16 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
                     "Table '%s' does not exist in database '%s'"
                             .formatted(tableName, currentDbName));
         }
+
+        // Drop any indexes belonging to this table
+        List<String> indexesToDrop = openIndexes.values().stream()
+                .filter(idx -> idx.getTableName().equalsIgnoreCase(tableName))
+                .map(dev.koradb.index.BPlusTree::getName)
+                .toList();
+        for (String idxName : indexesToDrop) {
+            dropIndex(idxName);
+        }
+
         // Close and remove the TableFile
         TableFile tf = openFiles.remove(key);
         tf.close();
@@ -221,16 +249,98 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
                     "Table '%s' does not exist in database '%s'"
                             .formatted(tableName, currentDbName));
         }
-        // Return a DiskTable proxy that delegates to the open TableFile
+        // Return a DiskTable proxy that delegates to the open TableFile and updates indexes
         TableFile tf = openFiles.get(key);
-        return new DiskTable(tableName, tf);
+        return new DiskTable(tableName, tf, () -> getIndexesForTable(tableName));
     }
 
     @Override
     public List<Table> listTables() {
         requireCurrentDbDir();
         return openFiles.entrySet().stream()
-                .map(e -> (Table) new DiskTable(e.getKey(), e.getValue()))
+                .map(e -> (Table) new DiskTable(e.getKey(), e.getValue(), () -> getIndexesForTable(e.getKey())))
+                .toList();
+    }
+
+    // =========================================================================
+    // Index management
+    // =========================================================================
+
+    @Override
+    public void createIndex(String indexName, String tableName, String columnName, boolean unique) {
+        Path dbDir = requireCurrentDbDir();
+        String tableKey = tableName.toLowerCase();
+        if (!openFiles.containsKey(tableKey)) {
+            throw new SchemaException("Table '%s' does not exist in database '%s'".formatted(tableName, currentDbName));
+        }
+        if (openIndexes.containsKey(indexName.toLowerCase())) {
+            throw new SchemaException("Index '%s' already exists in database '%s'".formatted(indexName, currentDbName));
+        }
+
+        TableFile tf = openFiles.get(tableKey);
+        if (!tf.getSchema().hasColumn(columnName)) {
+            throw new SchemaException("Column '%s' does not exist in table '%s'".formatted(columnName, tableName));
+        }
+
+        DataType colType = tf.getSchema().findColumn(columnName).dataType();
+        Path indexPath = dbDir.resolve(indexName.toLowerCase() + ".idx");
+        DiskPageManager dpm = new DiskPageManager(indexPath);
+        BufferPool bp = new BufferPool(dpm);
+        dev.koradb.index.BPlusTree bTree = new dev.koradb.index.BPlusTree(
+                indexName, tableName, columnName, colType, unique, bp);
+
+        // Populate with existing rows
+        for (TableFile.RidRow rr : tf.scanWithRids()) {
+            Object val = rr.row().get(columnName);
+            if (val != null) {
+                bTree.insert(new dev.koradb.index.IndexKey(val, colType), rr.rid());
+            }
+        }
+        bTree.flush();
+
+        openIndexes.put(indexName.toLowerCase(), bTree);
+        appendIndexToMeta(dbDir, indexName, tableName, columnName, unique);
+        log.info("Created index '{}' on {}({}) in database '{}'", indexName, tableName, columnName, currentDbName);
+    }
+
+    @Override
+    public void dropIndex(String indexName) {
+        Path dbDir = requireCurrentDbDir();
+        String key = indexName.toLowerCase();
+        dev.koradb.index.BPlusTree bTree = openIndexes.remove(key);
+        if (bTree == null) {
+            throw new SchemaException("Index '%s' does not exist in database '%s'".formatted(indexName, currentDbName));
+        }
+        bTree.close();
+        Path indexPath = dbDir.resolve(key + ".idx");
+        try {
+            Files.deleteIfExists(indexPath);
+        } catch (IOException e) {
+            log.warn("Could not delete index file: {}", indexPath, e);
+        }
+        rewriteMeta(dbDir);
+        log.info("Dropped index '{}' from database '{}'", indexName, currentDbName);
+    }
+
+    @Override
+    public Optional<dev.koradb.index.Index> getIndex(String indexName) {
+        return Optional.ofNullable(openIndexes.get(indexName.toLowerCase()));
+    }
+
+    @Override
+    public Optional<dev.koradb.index.Index> getIndexForColumn(String tableName, String columnName) {
+        return openIndexes.values().stream()
+                .filter(idx -> idx.getTableName().equalsIgnoreCase(tableName)
+                        && idx.getColumnName().equalsIgnoreCase(columnName))
+                .map(idx -> (dev.koradb.index.Index) idx)
+                .findFirst();
+    }
+
+    @Override
+    public List<dev.koradb.index.Index> getIndexesForTable(String tableName) {
+        return openIndexes.values().stream()
+                .filter(idx -> idx.getTableName().equalsIgnoreCase(tableName))
+                .map(idx -> (dev.koradb.index.Index) idx)
                 .toList();
     }
 
@@ -241,32 +351,40 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     private void appendToMeta(Path dbDir, Table table) {
         String line = tableToMetaLine(table) + "\n";
         try {
-            Files.writeString(metaFile(dbDir),
-                    Files.readString(metaFile(dbDir), StandardCharsets.UTF_8) + line,
-                    StandardCharsets.UTF_8);
+            Files.writeString(metaFile(dbDir), line, StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         } catch (IOException e) {
             throw new StorageException("Cannot write catalog.meta in " + dbDir, e);
         }
     }
 
+    private void appendIndexToMeta(Path dbDir, String indexName, String tableName, String columnName, boolean unique) {
+        String line = "INDEX " + indexName + " " + tableName + " " + columnName + " " + unique + "\n";
+        try {
+            Files.writeString(metaFile(dbDir), line, StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (IOException e) {
+            throw new StorageException("Cannot write index to catalog.meta in " + dbDir, e);
+        }
+    }
+
     private void rewriteMeta(Path dbDir) {
-        // Rebuild catalog.meta from currently open files
         Path metaPath = metaFile(dbDir);
         try {
-            List<String> lines = new ArrayList<>();
-            for (Map.Entry<String, TableFile> entry : openFiles.entrySet()) {
-                // We need the schema — read it from the existing meta
-            }
-            // Re-read existing lines, removing the dropped table
             String existing = Files.exists(metaPath)
                     ? Files.readString(metaPath, StandardCharsets.UTF_8) : "";
             List<String> kept = Arrays.stream(existing.split("\n"))
+                    .map(String::trim)
                     .filter(l -> !l.isBlank())
                     .filter(l -> {
-                        // Keep lines for tables that are still open
                         String[] parts = l.split("\\s+");
                         if (parts.length < 2) return false;
-                        return openFiles.containsKey(parts[1].toLowerCase());
+                        if (parts[0].equalsIgnoreCase("TABLE")) {
+                            return openFiles.containsKey(parts[1].toLowerCase());
+                        } else if (parts[0].equalsIgnoreCase("INDEX")) {
+                            return openIndexes.containsKey(parts[1].toLowerCase());
+                        }
+                        return false;
                     })
                     .toList();
             Files.writeString(metaPath, String.join("\n", kept) + (kept.isEmpty() ? "" : "\n"),
@@ -276,18 +394,40 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         }
     }
 
-    /** Loads all table schemas from catalog.meta (returns empty list if file is empty). */
-    private List<Table> loadMeta(Path dbDir) {
+    private record IndexMeta(String name, String tableName, String columnName, boolean unique) {}
+
+    /** Loads all table schemas from catalog.meta. */
+    private List<Table> loadTablesMeta(Path dbDir) {
         Path metaPath = metaFile(dbDir);
         if (!Files.exists(metaPath)) return List.of();
 
         try {
             return Files.readAllLines(metaPath, StandardCharsets.UTF_8).stream()
-                    .filter(l -> !l.isBlank())
+                    .map(String::trim)
+                    .filter(l -> !l.isBlank() && l.toUpperCase().startsWith("TABLE "))
                     .map(this::parseMetaLine)
                     .toList();
         } catch (IOException e) {
             throw new StorageException("Cannot read catalog.meta in " + dbDir, e);
+        }
+    }
+
+    /** Loads all index definitions from catalog.meta. */
+    private List<IndexMeta> loadIndexesMeta(Path dbDir) {
+        Path metaPath = metaFile(dbDir);
+        if (!Files.exists(metaPath)) return List.of();
+
+        try {
+            return Files.readAllLines(metaPath, StandardCharsets.UTF_8).stream()
+                    .map(String::trim)
+                    .filter(l -> !l.isBlank() && l.toUpperCase().startsWith("INDEX "))
+                    .map(l -> {
+                        String[] parts = l.split("\\s+");
+                        return new IndexMeta(parts[1], parts[2], parts[3], Boolean.parseBoolean(parts[4]));
+                    })
+                    .toList();
+        } catch (IOException e) {
+            throw new StorageException("Cannot read index metadata from catalog.meta in " + dbDir, e);
         }
     }
 
@@ -325,8 +465,14 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
 
     @Override
     public void close() {
+        closeOpenIndexes();
         closeOpenFiles();
         log.debug("DiskCatalog closed");
+    }
+
+    private void closeOpenIndexes() {
+        openIndexes.values().forEach(dev.koradb.index.BPlusTree::close);
+        openIndexes.clear();
     }
 
     private void closeOpenFiles() {
