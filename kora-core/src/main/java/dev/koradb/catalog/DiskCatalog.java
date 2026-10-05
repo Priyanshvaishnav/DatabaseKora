@@ -63,6 +63,23 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
 
     private String currentDbName = null; // lowercase key
     private dev.koradb.storage.wal.LogManager logManager = null;
+    private dev.koradb.transaction.TransactionManager transactionManager = null;
+
+    public void setTransactionManager(dev.koradb.transaction.TransactionManager transactionManager) {
+        this.transactionManager = transactionManager;
+        syncTransactionManager();
+    }
+
+    public void syncTransactionManager() {
+        if (transactionManager == null) return;
+        long max = 0L;
+        for (TableFile tf : openFiles.values()) {
+            max = Math.max(max, tf.getMaxTxnId());
+        }
+        if (max > 0) {
+            transactionManager.initNextTxnId(max + 100);
+        }
+    }
 
     /**
      * Creates a DiskCatalog rooted at the given data directory.
@@ -174,6 +191,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
 
         // Run ARIES Crash Recovery if WAL contains records
         boolean recovered = false;
+        long walMaxTxnId = 0L;
         dev.koradb.storage.recovery.RecoveryManager recoveryManager =
                 new dev.koradb.storage.recovery.RecoveryManager(walPath, logManager, openFiles::get, openFiles::values);
         if (recoveryManager.needsRecovery()) {
@@ -182,6 +200,24 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
                 log.info("Recovered database '{}': {}", name, recoveryResult);
                 recovered = true;
             }
+            if (transactionManager != null && recoveryResult.getAnalysisResult() != null) {
+                for (long loser : recoveryResult.getAnalysisResult().getLoserTxnIds()) {
+                    transactionManager.recordAborted(loser);
+                }
+                for (long winner : recoveryResult.getAnalysisResult().getWinnerTxnIds()) {
+                    transactionManager.recordCommitted(winner);
+                }
+                walMaxTxnId = recoveryResult.getAnalysisResult().getTransactionTable().keySet().stream()
+                        .mapToLong(Long::longValue).max().orElse(0L);
+            }
+        }
+
+        long max = walMaxTxnId;
+        for (TableFile tf : openFiles.values()) {
+            max = Math.max(max, tf.getMaxTxnId());
+        }
+        if (transactionManager != null && max > 0) {
+            transactionManager.initNextTxnId(max + 100);
         }
 
         // Pre-open BPlusTree handles for all existing indexes (rebuilding if recovered)

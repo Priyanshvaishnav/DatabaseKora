@@ -93,6 +93,9 @@ public final class KoraDB implements AutoCloseable {
         this.lockManager        = new LockManager();
         this.transactionManager = new TransactionManager(this.lockManager, this.catalog);
         this.defaultSession     = new dev.koradb.session.Session(this.catalog);
+        if (this.catalog instanceof DiskCatalog diskCatalog) {
+            diskCatalog.setTransactionManager(this.transactionManager);
+        }
         log.debug("KoraDB instance initialized ({})",
                 catalog.getClass().getSimpleName());
     }
@@ -177,6 +180,22 @@ public final class KoraDB implements AutoCloseable {
     }
 
     /**
+     * Creates a VacuumManager to reclaim dead tuple versions across tables.
+     */
+    public dev.koradb.mvcc.VacuumManager createVacuumManager() {
+        return new dev.koradb.mvcc.VacuumManager(catalog, transactionManager);
+    }
+
+    /**
+     * Reclaims dead tuple versions across all tables in the database.
+     *
+     * @return the number of dead tuple versions reclaimed
+     */
+    public int vacuum() {
+        return createVacuumManager().vacuum();
+    }
+
+    /**
      * Executes a SQL statement on the default session and returns the result.
      *
      * @param sql the SQL string to execute
@@ -215,7 +234,7 @@ public final class KoraDB implements AutoCloseable {
                 if (session.hasActiveTransaction()) {
                     throw new dev.koradb.exception.ExecutionException("Transaction is already active");
                 }
-                dev.koradb.transaction.Transaction txn = transactionManager.beginTransaction();
+                dev.koradb.transaction.Transaction txn = transactionManager.beginTransaction(session.getDefaultIsolationLevel());
                 session.setActiveTransaction(txn);
                 yield QueryResult.ddl();
             }
@@ -239,16 +258,20 @@ public final class KoraDB implements AutoCloseable {
                 if (session.hasActiveTransaction()) {
                     dev.koradb.transaction.Transaction txn = session.getActiveTransaction();
                     try {
-                        yield executor.execute(statement, cat, txn, lockManager);
+                        yield executor.execute(statement, cat, txn, lockManager, transactionManager);
                     } catch (dev.koradb.transaction.lock.DeadlockException de) {
                         transactionManager.abortTransaction(txn, cat);
                         session.clearActiveTransaction();
                         throw de;
+                    } catch (dev.koradb.mvcc.WriteConflictException wce) {
+                        transactionManager.abortTransaction(txn, cat);
+                        session.clearActiveTransaction();
+                        throw wce;
                     }
                 } else if (session.isAutoCommit()) {
-                    dev.koradb.transaction.Transaction txn = transactionManager.beginTransaction();
+                    dev.koradb.transaction.Transaction txn = transactionManager.beginTransaction(session.getDefaultIsolationLevel());
                     try {
-                        QueryResult res = executor.execute(statement, cat, txn, lockManager);
+                        QueryResult res = executor.execute(statement, cat, txn, lockManager, transactionManager);
                         transactionManager.commitTransaction(txn);
                         yield res;
                     } catch (Exception e) {

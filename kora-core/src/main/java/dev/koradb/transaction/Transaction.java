@@ -15,7 +15,7 @@ import java.util.Objects;
 public class Transaction {
 
     private final TransactionId id;
-    private final IsolationLevel isolationLevel;
+    private volatile IsolationLevel isolationLevel;
     private final long startTimeMillis;
     private final Deque<UndoAction> undoStack = new ArrayDeque<>();
     private long prevLsn = 0L;
@@ -39,6 +39,10 @@ public class Transaction {
 
     public IsolationLevel getIsolationLevel() {
         return isolationLevel;
+    }
+
+    public void setIsolationLevel(IsolationLevel isolationLevel) {
+        this.isolationLevel = Objects.requireNonNull(isolationLevel, "isolationLevel must not be null");
     }
 
     public long getStartTimeMillis() {
@@ -112,6 +116,27 @@ public class Transaction {
             throw new IllegalStateException("Cannot abort already committed transaction: " + id);
         }
         state = TransactionState.ABORTED;
+    }
+
+    private volatile dev.koradb.mvcc.ReadView readView;
+
+    public dev.koradb.mvcc.ReadView getReadView() {
+        return readView;
+    }
+
+    public void setReadView(dev.koradb.mvcc.ReadView readView) {
+        this.readView = readView;
+    }
+
+    public synchronized dev.koradb.mvcc.ReadView getOrCreateReadView(java.util.function.Supplier<dev.koradb.mvcc.ReadView> factory) {
+        if (readView == null) {
+            readView = factory.get();
+        }
+        return readView;
+    }
+
+    public void clearReadView() {
+        this.readView = null;
     }
 
     @Override

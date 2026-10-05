@@ -111,6 +111,10 @@ public final class TableFile implements AutoCloseable {
      * @return the {@link RecordId} permanently identifying the inserted row
      */
     public RecordId insertRow(Row row, dev.koradb.transaction.Transaction txn) {
+        if (txn != null) {
+            row.setXmin(txn.getId().value());
+            row.setXmax(0L);
+        }
         byte[] record = serializer.serialize(row);
 
         int totalPages = diskManager.pageCount();
@@ -159,6 +163,13 @@ public final class TableFile implements AutoCloseable {
      * Used by the executor for WHERE-based UPDATE and DELETE.
      */
     public List<RidRow> scanWithRids() {
+        return scanWithRids(dev.koradb.mvcc.MvccContext.getReadView());
+    }
+
+    /**
+     * Reads every row matching the given ReadView snapshot, paired with their RIDs.
+     */
+    public List<RidRow> scanWithRids(dev.koradb.mvcc.ReadView readView) {
         List<RidRow> result = new ArrayList<>();
         int totalPages = diskManager.pageCount();
 
@@ -170,7 +181,15 @@ public final class TableFile implements AutoCloseable {
                     if (sp.isAlive(slot)) {
                         byte[] record = sp.getRecord(slot);
                         Row    r      = serializer.deserialize(record);
-                        result.add(new RidRow(new RecordId(pid, slot), r));
+                        if (readView != null) {
+                            if (readView.isVisible(r.getXmin(), r.getXmax())) {
+                                result.add(new RidRow(new RecordId(pid, slot), r));
+                            }
+                        } else {
+                            if (r.getXmax() == 0L) {
+                                result.add(new RidRow(new RecordId(pid, slot), r));
+                            }
+                        }
                     }
                 }
             } finally {
@@ -184,6 +203,13 @@ public final class TableFile implements AutoCloseable {
      * Reads every live row (no RIDs). Used by SELECT.
      */
     public List<Row> scanAll() {
+        return scanAll(dev.koradb.mvcc.MvccContext.getReadView());
+    }
+
+    /**
+     * Reads every row matching the given ReadView snapshot (no RIDs).
+     */
+    public List<Row> scanAll(dev.koradb.mvcc.ReadView readView) {
         List<Row> result = new ArrayList<>();
         int totalPages   = diskManager.pageCount();
 
@@ -194,7 +220,16 @@ public final class TableFile implements AutoCloseable {
                 for (int slot = 0; slot < sp.slotCount(); slot++) {
                     if (sp.isAlive(slot)) {
                         byte[] record = sp.getRecord(slot);
-                        result.add(serializer.deserialize(record));
+                        Row    r      = serializer.deserialize(record);
+                        if (readView != null) {
+                            if (readView.isVisible(r.getXmin(), r.getXmax())) {
+                                result.add(r);
+                            }
+                        } else {
+                            if (r.getXmax() == 0L) {
+                                result.add(r);
+                            }
+                        }
                     }
                 }
             } finally {
@@ -202,7 +237,7 @@ public final class TableFile implements AutoCloseable {
             }
         }
 
-        log.debug("Full scan returned {} row(s)", result.size());
+        log.debug("Scan returned {} row(s)", result.size());
         return result;
     }
 
@@ -210,6 +245,13 @@ public final class TableFile implements AutoCloseable {
      * Reads a single row by its {@link RecordId}.
      */
     public Row readRow(RecordId rid) {
+        return readRow(rid, dev.koradb.mvcc.MvccContext.getReadView());
+    }
+
+    /**
+     * Reads a single row by its {@link RecordId}, visible under the specified ReadView.
+     */
+    public Row readRow(RecordId rid, dev.koradb.mvcc.ReadView readView) {
         BufferFrame frame = bufferPool.pin(rid.pageId());
         try {
             SlottedPage sp = new SlottedPage(frame.getPage());
@@ -217,7 +259,12 @@ public final class TableFile implements AutoCloseable {
                 return null;
             }
             byte[] record = sp.getRecord(rid.slotIndex());
-            return serializer.deserialize(record);
+            Row r = serializer.deserialize(record);
+            if (readView != null) {
+                return readView.isVisible(r.getXmin(), r.getXmax()) ? r : null;
+            } else {
+                return r.getXmax() == 0L ? r : null;
+            }
         } finally {
             bufferPool.unpin(frame);
         }
@@ -236,19 +283,68 @@ public final class TableFile implements AutoCloseable {
     }
 
     /**
-     * Marks the slot at {@code rid} as a tombstone and records a WAL update record.
+     * Marks the row version at {@code rid} deleted under MVCC by stamping its xmax.
+     * Throws WriteConflictException if the row is already concurrently deleted or updated.
      */
     public void deleteRow(RecordId rid, dev.koradb.transaction.Transaction txn) {
         BufferFrame frame = bufferPool.pin(rid.pageId());
         try {
             SlottedPage sp = new SlottedPage(frame.getPage());
-            byte[] oldBytes = sp.isAlive(rid.slotIndex()) ? sp.getRecord(rid.slotIndex()) : new byte[0];
-            sp.deleteRecord(rid.slotIndex());
-            applyWalAndMarkDirty(frame, rid.slotIndex(), oldBytes, new byte[0], txn);
+            if (!sp.isAlive(rid.slotIndex())) {
+                return;
+            }
+            if (txn == null) {
+                sp.deleteRecord(rid.slotIndex());
+                bufferPool.markDirty(frame);
+                return;
+            }
+            long txnId = txn.getId().value();
+            byte[] oldBytes = sp.getRecord(rid.slotIndex());
+            long oldXmax = RecordSerializer.extractXmax(oldBytes);
+            if (oldXmax != 0L && oldXmax != txnId) {
+                throw new dev.koradb.mvcc.WriteConflictException(oldXmax, txnId);
+            }
+
+            byte[] newBytes = oldBytes.clone();
+            RecordSerializer.setXmax(newBytes, txnId);
+            sp.updateRecord(rid.slotIndex(), newBytes);
+            applyWalAndMarkDirty(frame, rid.slotIndex(), oldBytes, newBytes, txn);
+            log.debug("Deleted row at {} (stamped xmax={})", rid, txnId);
         } finally {
             bufferPool.unpin(frame);
         }
-        log.debug("Deleted row at {}", rid);
+    }
+
+    /**
+     * Reclaims page space occupied by dead tuple versions whose xmax is older than lowWatermark.
+     */
+    public int vacuum(long lowWatermark, java.util.function.Predicate<Long> isCommitted) {
+        int reclaimed = 0;
+        int totalPages = diskManager.pageCount();
+        for (int pid = 0; pid < totalPages; pid++) {
+            BufferFrame frame = bufferPool.pin(pid);
+            try {
+                SlottedPage sp = new SlottedPage(frame.getPage());
+                boolean modified = false;
+                for (int slot = 0; slot < sp.slotCount(); slot++) {
+                    if (sp.isAlive(slot)) {
+                        byte[] record = sp.getRecord(slot);
+                        long xmax = RecordSerializer.extractXmax(record);
+                        if (xmax != 0L && xmax < lowWatermark && isCommitted.test(xmax)) {
+                            sp.deleteRecord(slot);
+                            modified = true;
+                            reclaimed++;
+                        }
+                    }
+                }
+                if (modified) {
+                    bufferPool.markDirty(frame);
+                }
+            } finally {
+                bufferPool.unpin(frame);
+            }
+        }
+        return reclaimed;
     }
 
     // =========================================================================
@@ -289,9 +385,31 @@ public final class TableFile implements AutoCloseable {
         }
     }
 
-    // =========================================================================
-    // Metadata
-    // =========================================================================
+    /**
+     * Scans all pages and returns the maximum xmin or xmax found on live slots.
+     */
+    public long getMaxTxnId() {
+        long max = 0L;
+        int totalPages = diskManager.pageCount();
+        for (int pid = 0; pid < totalPages; pid++) {
+            BufferFrame frame = bufferPool.pin(pid);
+            try {
+                SlottedPage sp = new SlottedPage(frame.getPage());
+                for (int slot = 0; slot < sp.slotCount(); slot++) {
+                    if (sp.isAlive(slot)) {
+                        byte[] record = sp.getRecord(slot);
+                        long xmin = RecordSerializer.extractXmin(record);
+                        long xmax = RecordSerializer.extractXmax(record);
+                        if (xmin > max) max = xmin;
+                        if (xmax > max) max = xmax;
+                    }
+                }
+            } finally {
+                bufferPool.unpin(frame);
+            }
+        }
+        return max;
+    }
 
     /** Returns the number of pages allocated to this table. */
     public int pageCount() {

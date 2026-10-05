@@ -51,6 +51,16 @@ public final class DiskTable extends Table {
         return tableFile.scanAll();
     }
 
+    @Override
+    public List<Row> getRows(dev.koradb.mvcc.ReadView readView) {
+        return tableFile.scanAll(readView);
+    }
+
+    @Override
+    public int vacuum(long lowWatermark, java.util.function.Predicate<Long> isCommitted) {
+        return tableFile.vacuum(lowWatermark, isCommitted);
+    }
+
     /**
      * Inserts a row into the disk store and updates associated indexes.
      */

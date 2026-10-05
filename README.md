@@ -4,7 +4,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-blue)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Build-Maven-orange)](https://maven.apache.org/)
-[![Status](https://img.shields.io/badge/Milestone-9%20Crash%20Recovery-green)](#milestones)
+[![Status](https://img.shields.io/badge/Milestone-10%20MVCC-green)](#milestones)
 
 ---
 
@@ -63,8 +63,8 @@ Storage Engine (Pages on disk)                        ← Phase 2
 | 7 | Transactions | ✅ Complete |
 | 8 | Write-Ahead Logging | ✅ Complete |
 | 9 | Crash Recovery (ARIES) | ✅ Complete |
-| 10 | MVCC | 🔜 Next |
-| 11 | Database Server + CLI | ⬜ |
+| 10 | MVCC | ✅ Complete |
+| 11 | Database Server + CLI | 🔜 Next |
 | 12 | Replication | ⬜ |
 | 13 | Observability | ⬜ |
 | 14 | Docker + Kubernetes | ⬜ |
@@ -129,6 +129,16 @@ db.execute("ROLLBACK"); // Cleanly restores accounts to pre-transaction state
 // Periodic Checkpointing & ARIES Crash Recovery
 long checkpointLsn = db.checkpoint(); // Flushes dirty frames & takes ATT/DPT snapshot
 dev.koradb.storage.recovery.RecoveryResult result = db.recover(); // 3-phase ARIES recovery
+
+// Multi-Version Concurrency Control (MVCC) & Snapshot Isolation
+db.getSession().setDefaultIsolationLevel(dev.koradb.transaction.IsolationLevel.SNAPSHOT);
+db.execute("BEGIN");
+QueryResult snapshotRead = db.execute("SELECT * FROM accounts WHERE id = 1");
+// Concurrent writers on other sessions will not block or affect snapshotRead!
+db.execute("COMMIT");
+
+// Vacuum Garbage Collection (reclaims dead tuple versions)
+long reclaimedVersions = db.vacuum();
 ```
 
 ---
