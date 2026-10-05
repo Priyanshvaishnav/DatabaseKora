@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "koradb.primary.fullname" . }}-headless
+  labels:
+    {{- include "koradb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: primary
+spec:
+  clusterIP: None
+  selector:
+    {{- include "koradb.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: primary
+  ports:
+    - name: sql
+      port: {{ .Values.cluster.port }}
+      targetPort: 8765
+    - name: replication
+      port: {{ .Values.cluster.replicationPort }}
+      targetPort: 8766
+    - name: metrics
+      port: {{ .Values.cluster.metricsPort }}
+      targetPort: 9100
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "koradb.primary.fullname" . }}
+  labels:
+    {{- include "koradb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: primary
+spec:
+  type: {{ .Values.primary.service.type }}
+  selector:
+    {{- include "koradb.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: primary
+  ports:
+    - name: sql
+      port: {{ .Values.primary.service.port }}
+      targetPort: 8765
+    - name: metrics
+      port: {{ .Values.cluster.metricsPort }}
+      targetPort: 9100
+{{- if .Values.replica.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "koradb.replica.fullname" . }}
+  labels:
+    {{- include "koradb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+spec:
+  type: {{ .Values.replica.service.type }}
+  selector:
+    {{- include "koradb.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+  ports:
+    - name: sql
+      port: {{ .Values.replica.service.port }}
+      targetPort: 8765
+    - name: metrics
+      port: {{ .Values.cluster.metricsPort }}
+      targetPort: 9100
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "koradb.fullname" . }}-metrics
+  labels:
+    {{- include "koradb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "koradb.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.cluster.metricsPort }}
+      targetPort: 9100

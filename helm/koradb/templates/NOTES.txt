@@ -1,0 +1,39 @@
+================================================================================
+  KoraDB Cluster Deployed Successfully!
+================================================================================
+
+1. Primary Node (Read-Write SQL Engine):
+   Service: {{ include "koradb.primary.fullname" . }}
+   Port:    {{ .Values.primary.service.port }}
+
+   Connect using port-forwarding:
+     kubectl port-forward svc/{{ include "koradb.primary.fullname" . }} 8765:{{ .Values.primary.service.port }} -n {{ .Release.Namespace }}
+
+   Connect using the KoraDB CLI:
+     koradb-cli -h 127.0.0.1 -p 8765
+
+{{- if .Values.replica.enabled }}
+
+2. Read Replicas (Read-Only MVCC Horizontal Scaling):
+   Service: {{ include "koradb.replica.fullname" . }}
+   Port:    {{ .Values.replica.service.port }}
+
+   Connect to load-balanced read replicas:
+     kubectl port-forward svc/{{ include "koradb.replica.fullname" . }} 8767:{{ .Values.replica.service.port }} -n {{ .Release.Namespace }}
+     koradb-cli -h 127.0.0.1 -p 8767
+{{- end }}
+
+3. Prometheus Metrics & Health Endpoint:
+   Service: {{ include "koradb.fullname" . }}-metrics
+   Port:    {{ .Values.cluster.metricsPort }}
+
+   Check health:
+     kubectl port-forward svc/{{ include "koradb.fullname" . }}-metrics 9100:{{ .Values.cluster.metricsPort }} -n {{ .Release.Namespace }}
+     curl http://127.0.0.1:9100/health
+     curl http://127.0.0.1:9100/metrics
+
+4. Run CLI inside the cluster:
+     kubectl run koradb-client --rm -it --image="{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}" \
+       --namespace {{ .Release.Namespace }} -- cli -h {{ include "koradb.primary.fullname" . }} -p 8765
+
+================================================================================

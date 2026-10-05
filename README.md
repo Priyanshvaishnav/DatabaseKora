@@ -4,7 +4,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-blue)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Build-Maven-orange)](https://maven.apache.org/)
-[![Status](https://img.shields.io/badge/Milestone-13%20Observability-green)](#milestones)
+[![Status](https://img.shields.io/badge/Milestone-14%20Docker%20%2B%20Kubernetes-green)](#milestones)
 
 ---
 
@@ -67,8 +67,8 @@ Storage Engine (Pages on disk)                        ← Phase 2
 | 11 | Database Server + CLI | ✅ Complete |
 | 12 | Replication | ✅ Complete |
 | 13 | Observability | ✅ Complete |
-| 14 | Docker + Kubernetes | 🔜 Next |
-| 15 | Benchmarks | ⬜ |
+| 14 | Docker + Kubernetes | ✅ Complete |
+| 15 | Benchmarks | 🔜 Next |
 | 16 | AI Layer | ⬜ |
 
 ---
@@ -231,6 +231,22 @@ db.execute("SHOW TRANSACTIONS;");
 db.execute("SHOW METRICS;");
 ```
 
+### Docker & Kubernetes Quick Start
+
+```bash
+# Run multi-node cluster with Primary, 2 Replicas, Prometheus, and Grafana
+docker compose up -d
+
+# Connect to Primary via CLI (Read-Write)
+docker run -it --rm --network host koradb:latest cli -h 127.0.0.1 -p 8765
+
+# Connect to Replica 1 via CLI (Read-Only)
+docker run -it --rm --network host koradb:latest cli -h 127.0.0.1 -p 8767
+
+# Deploy to Kubernetes via Helm 3
+helm install koradb ./helm/koradb -n koradb --create-namespace
+```
+
 ---
 
 ## Module Structure
@@ -271,6 +287,7 @@ kora-db/
 | [Server & CLI](docs/server-and-cli.md) | Network TCP server, binary wire protocol & interactive CLI ← Phase 11 |
 | [Replication](docs/replication.md) | WAL-based physical replication (Async, Sync, Failover) ← Phase 12 |
 | [Observability](docs/observability.md) | Prometheus metrics, HTTP exporter, OTel tracing & Grafana ← Phase 13 |
+| [Docker & Kubernetes](docs/docker-and-kubernetes.md) | Multi-stage Docker, Compose cluster, k8s StatefulSets & Helm chart ← Phase 14 |
 | [Benchmarks](docs/benchmarks.md) | Performance results ← Phase 15 |
 
 ---

@@ -9,12 +9,14 @@ import java.nio.file.Path;
  * @param port          the TCP port to listen on (0 for ephemeral)
  * @param backlog       connection backlog queue size
  * @param dataDirectory optional path to persistent data directory; null for in-memory mode
+ * @param readOnly      whether this server instance rejects mutating statements (read replica mode)
  */
 public record KoraServerConfig(
         String host,
         int port,
         int backlog,
-        Path dataDirectory
+        Path dataDirectory,
+        boolean readOnly
 ) {
 
     public static final String DEFAULT_HOST = "127.0.0.1";
@@ -29,12 +31,20 @@ public record KoraServerConfig(
         if (backlog <= 0) backlog = DEFAULT_BACKLOG;
     }
 
+    public KoraServerConfig(String host, int port, int backlog, Path dataDirectory) {
+        this(host, port, backlog, dataDirectory, false);
+    }
+
     public static KoraServerConfig inMemory(int port) {
-        return new KoraServerConfig(DEFAULT_HOST, port, DEFAULT_BACKLOG, null);
+        return new KoraServerConfig(DEFAULT_HOST, port, DEFAULT_BACKLOG, null, false);
     }
 
     public static KoraServerConfig persistent(int port, Path dataDirectory) {
-        return new KoraServerConfig(DEFAULT_HOST, port, DEFAULT_BACKLOG, dataDirectory);
+        return new KoraServerConfig(DEFAULT_HOST, port, DEFAULT_BACKLOG, dataDirectory, false);
+    }
+
+    public static KoraServerConfig readOnly(String host, int port, Path dataDirectory) {
+        return new KoraServerConfig(host, port, DEFAULT_BACKLOG, dataDirectory, true);
     }
 
     public static KoraServerConfig defaultConfig() {

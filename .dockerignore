@@ -1,0 +1,13 @@
+**/.git
+**/.github
+**/.idea
+**/.vscode
+**/target
+**/*.log
+**/tmp
+**/data
+helm/
+k8s/
+docker/
+docs/
+*.md

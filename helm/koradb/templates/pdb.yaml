@@ -1,0 +1,15 @@
+{{- if and .Values.replica.enabled .Values.replica.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "koradb.replica.fullname" . }}-pdb
+  labels:
+    {{- include "koradb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+spec:
+  minAvailable: {{ .Values.replica.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "koradb.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: replica
+{{- end }}

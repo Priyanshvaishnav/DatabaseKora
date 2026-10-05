@@ -97,6 +97,7 @@ public final class KoraServer implements AutoCloseable {
                         clientSocket,
                         db,
                         connId,
+                        config.readOnly(),
                         activeHandlers::remove
                 );
 
@@ -178,5 +179,9 @@ public final class KoraServer implements AutoCloseable {
 
     public KoraDB getDb() {
         return db;
+    }
+
+    public boolean isReadOnly() {
+        return config.readOnly();
     }
 }
