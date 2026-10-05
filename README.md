@@ -55,12 +55,12 @@ Storage Engine (Pages on disk)                        ← Phase 2
 | # | Milestone | Status |
 |---|---|---|
 | 1 | SQL Engine (in-memory) | ✅ Complete |
-| 2 | Storage Engine (disk-backed pages) | 🔜 Next |
-| 3 | Buffer Pool | ⬜ |
-| 4 | B+ Tree Index | ⬜ |
-| 5 | Query Execution (operator tree) | ⬜ |
-| 6 | Query Planner and Optimizer | ⬜ |
-| 7 | Transactions | ⬜ |
+| 2 | Storage Engine (disk-backed pages) | ✅ Complete |
+| 3 | Buffer Pool | ✅ Complete |
+| 4 | B+ Tree Index | ✅ Complete |
+| 5 | Query Execution (operator tree) | ✅ Complete |
+| 6 | Query Planner and Optimizer | ✅ Complete |
+| 7 | Transactions | 🔜 Next |
 | 8 | Write-Ahead Logging | ⬜ |
 | 9 | Crash Recovery | ⬜ |
 | 10 | MVCC | ⬜ |

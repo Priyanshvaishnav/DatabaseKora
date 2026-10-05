@@ -100,6 +100,7 @@ public final class Parser {
             case SELECT   -> parseSelect();
             case UPDATE   -> parseUpdate();
             case DELETE   -> parseDelete();
+            case EXPLAIN  -> parseExplain();
             default       -> throw new ParseException(
                     "Expected a SQL statement but found: '" + token.lexeme() + "'",
                     token.line());
@@ -521,6 +522,24 @@ public final class Parser {
     }
 
     // =========================================================================
+    // EXPLAIN [ANALYZE]
+    // =========================================================================
+
+    /**
+     * {@code EXPLAIN [ANALYZE] <statement>}
+     */
+    private ExplainStmt parseExplain() {
+        consume(EXPLAIN, "EXPLAIN");
+        boolean analyze = false;
+        if (check(ANALYZE)) {
+            advance();
+            analyze = true;
+        }
+        Statement target = statement();
+        return new ExplainStmt(target, analyze);
+    }
+
+    // =========================================================================
     // WHERE clause
     // =========================================================================
 
@@ -546,15 +565,20 @@ public final class Parser {
      * Parses a single comparison predicate: {@code column op (literal | column)}.
      */
     private BinaryExpr parsePredicate() {
-        String leftCol = consumeQualifiedIdentifier("column name in predicate");
-        Operator op    = parseOperator();
+        Expression lhs;
+        if (peek().type() == IDENTIFIER || isKeywordAsIdentifier(peek().type())) {
+            lhs = new ColumnRefExpr(consumeQualifiedIdentifier("column name in predicate"));
+        } else {
+            lhs = parseLiteral();
+        }
+        Operator op = parseOperator();
         Expression rhs;
-        if (peek().type() == IDENTIFIER) {
+        if (peek().type() == IDENTIFIER || isKeywordAsIdentifier(peek().type())) {
             rhs = new ColumnRefExpr(consumeQualifiedIdentifier("column name in predicate"));
         } else {
             rhs = parseLiteral();
         }
-        return new BinaryExpr(new ColumnRefExpr(leftCol), op, rhs);
+        return new BinaryExpr(lhs, op, rhs);
     }
 
     private Operator parseOperator() {
@@ -669,7 +693,8 @@ public final class Parser {
     private boolean isKeywordAsIdentifier(TokenType type) {
         return switch (type) {
             case COUNT, SUM, AVG, MIN, MAX, ORDER, BY, ASC, DESC, LIMIT, OFFSET,
-                 INDEX, TABLE, DATABASE, USE, UNIQUE, ON, SET, VALUES, GROUP -> true;
+                 INDEX, TABLE, DATABASE, USE, UNIQUE, ON, SET, VALUES, GROUP,
+                 EXPLAIN, ANALYZE -> true;
             default -> false;
         };
     }

@@ -34,6 +34,9 @@ public final class StatementExecutor {
     private static final DateTimeFormatter TIMESTAMP_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
+    private final dev.koradb.planner.QueryPlanner queryPlanner = new dev.koradb.planner.QueryPlanner();
+    private final dev.koradb.planner.explain.ExplainExecutor explainExecutor = new dev.koradb.planner.explain.ExplainExecutor(queryPlanner);
+
     /**
      * Executes a parsed SQL statement against the given catalog.
      *
@@ -56,7 +59,13 @@ public final class StatementExecutor {
             case SelectStmt         s -> executeSelect(s, catalog);
             case UpdateStmt         s -> executeUpdate(s, catalog);
             case DeleteStmt         s -> executeDelete(s, catalog);
+            case ExplainStmt        s -> executeExplain(s, catalog);
         };
+    }
+
+    private QueryResult executeExplain(ExplainStmt stmt, Catalog catalog) {
+        log.debug("Executing EXPLAIN (analyze={})", stmt.analyze());
+        return explainExecutor.execute(stmt, catalog);
     }
 
     // =========================================================================
@@ -158,8 +167,8 @@ public final class StatementExecutor {
             }
         }
 
-        dev.koradb.execution.operator.Operator plan =
-                dev.koradb.execution.operator.PhysicalPlanBuilder.build(stmt, catalog);
+        dev.koradb.planner.physical.PhysicalPlan compiled = queryPlanner.plan(stmt, catalog).physicalPlan();
+        dev.koradb.execution.operator.Operator plan = compiled.rootOperator();
         plan.open();
         List<Row> rows = new ArrayList<>();
         try {
@@ -172,7 +181,7 @@ public final class StatementExecutor {
         }
 
         List<String> outputCols = plan.getSchema().columns().stream().map(ColumnDef::name).toList();
-        log.debug("SELECT returned {} row(s) from '{}'", rows.size(), stmt.tableName());
+        log.debug("SELECT returned {} row(s) from '{}' (plan cost: {})", rows.size(), stmt.tableName(), compiled.cost().format());
         return QueryResult.select(rows, outputCols);
     }
 
