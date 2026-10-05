@@ -4,7 +4,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-blue)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Build-Maven-orange)](https://maven.apache.org/)
-[![Status](https://img.shields.io/badge/Milestone-11%20Server%20%26%20CLI-green)](#milestones)
+[![Status](https://img.shields.io/badge/Milestone-12%20Replication-green)](#milestones)
 
 ---
 
@@ -65,8 +65,8 @@ Storage Engine (Pages on disk)                        ← Phase 2
 | 9 | Crash Recovery (ARIES) | ✅ Complete |
 | 10 | MVCC | ✅ Complete |
 | 11 | Database Server + CLI | ✅ Complete |
-| 12 | Replication | 🔜 Next |
-| 13 | Observability | ⬜ |
+| 12 | Replication | ✅ Complete |
+| 13 | Observability | 🔜 Next |
 | 14 | Docker + Kubernetes | ⬜ |
 | 15 | Benchmarks | ⬜ |
 | 16 | AI Layer | ⬜ |
@@ -170,6 +170,45 @@ try (KoraClient client = KoraClient.connect("localhost", 8765)) {
 }
 ```
 
+### Primary / Replica Streaming Replication
+
+```java
+// Start Primary Node with ReplicationMaster
+KoraDB primaryDb = new KoraDB(Path.of("/var/koradb/primary"));
+primaryDb.execute("CREATE DATABASE prod");
+primaryDb.execute("USE prod");
+
+DiskCatalog primaryCatalog = (DiskCatalog) primaryDb.getCatalog();
+ReplicationMaster master = new ReplicationMaster(
+    ReplicationMasterConfig.onPort(8766),
+    primaryCatalog.getLogManager(),
+    primaryCatalog::getDatabaseTableFiles
+);
+master.start();
+
+// Start Read-Only Replica connecting to Primary
+KoraDB replicaDb = new KoraDB(Path.of("/var/koradb/replica"));
+replicaDb.execute("CREATE DATABASE prod");
+replicaDb.execute("USE prod");
+
+ReplicationReplica replica = new ReplicationReplica(
+    replicaDb,
+    ReplicationReplicaConfig.of("replica-1", "localhost", 8766, ReplicationMode.ASYNC)
+);
+replica.start();
+
+// Primary writes, replica serves read-only queries with MVCC
+primaryDb.execute("CREATE TABLE users (id INT, name VARCHAR)");
+primaryDb.execute("INSERT INTO users VALUES (1, 'Alice')");
+
+// Consistent lock-free reads on replica
+QueryResult res = replica.execute("SELECT * FROM users");
+
+// Promote Replica to Primary during failover
+replica.promote();
+replica.execute("INSERT INTO users VALUES (2, 'Bob')"); // Now accepts writes!
+```
+
 ---
 
 ## Module Structure
@@ -208,7 +247,7 @@ kora-db/
 | [Recovery](docs/recovery.md) | Crash recovery algorithm ← Phase 9 |
 | [MVCC](docs/mvcc.md) | Multi-version concurrency ← Phase 10 |
 | [Server & CLI](docs/server-and-cli.md) | Network TCP server, binary wire protocol & interactive CLI ← Phase 11 |
-| [Replication](docs/replication.md) | WAL-based replication ← Phase 12 |
+| [Replication](docs/replication.md) | WAL-based physical replication (Async, Sync, Failover) ← Phase 12 |
 | [Observability](docs/observability.md) | Metrics and tracing ← Phase 13 |
 | [Benchmarks](docs/benchmarks.md) | Performance results ← Phase 15 |
 
