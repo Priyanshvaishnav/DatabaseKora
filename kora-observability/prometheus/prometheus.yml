@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "koradb-alerts.yml"
+
+scrape_configs:
+  - job_name: "koradb"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["localhost:9100"]
+        labels:
+          environment: "production"
+          service: "koradb"

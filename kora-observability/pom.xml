@@ -23,5 +23,15 @@
             <groupId>dev.koradb</groupId>
             <artifactId>kora-core</artifactId>
         </dependency>
+        <dependency>
+            <groupId>dev.koradb</groupId>
+            <artifactId>kora-server</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>dev.koradb</groupId>
+            <artifactId>kora-replication</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 </project>
