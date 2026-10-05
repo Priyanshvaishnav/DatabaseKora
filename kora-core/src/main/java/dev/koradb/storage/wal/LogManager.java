@@ -157,6 +157,25 @@ public final class LogManager implements AutoCloseable {
         return append(new EndLogRecord(prevLsn, txnId));
     }
 
+    public long appendDdl(long txnId, long prevLsn, String sql) {
+        return append(new DdlLogRecord(prevLsn, txnId, sql));
+    }
+
+    @FunctionalInterface
+    public interface WalFlushListener {
+        void onWalFlushed(long flushedLsn);
+    }
+
+    private final java.util.List<WalFlushListener> flushListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    public void addFlushListener(WalFlushListener listener) {
+        flushListeners.add(Objects.requireNonNull(listener, "listener must not be null"));
+    }
+
+    public void removeFlushListener(WalFlushListener listener) {
+        flushListeners.remove(listener);
+    }
+
     /**
      * Synchronously flushes log records up to {@code targetLsn} to disk using Group Commit.
      *
@@ -198,6 +217,14 @@ public final class LogManager implements AutoCloseable {
 
             synchronized (flushLock) {
                 flushedLsn = currentNextLsn;
+            }
+
+            for (WalFlushListener listener : flushListeners) {
+                try {
+                    listener.onWalFlushed(currentNextLsn);
+                } catch (Exception e) {
+                    log.warn("Error notifying WalFlushListener", e);
+                }
             }
         } catch (IOException e) {
             throw new RuntimeException("Error flushing WAL channel to disk", e);

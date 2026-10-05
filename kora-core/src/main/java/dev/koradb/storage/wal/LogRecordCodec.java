@@ -53,6 +53,11 @@ public final class LogRecordCodec {
                 length += 4 + (c.getActiveTransactionTable().size() * 16); // 8B txnId + 8B lastLsn
                 length += 4 + (c.getDirtyPageTable().size() * 12);         // 4B pageId + 8B recLsn
             }
+            case DDL -> {
+                DdlLogRecord d = (DdlLogRecord) record;
+                byte[] sqlBytes = d.getSql().getBytes(StandardCharsets.UTF_8);
+                length += 4 + sqlBytes.length; // 4B length + SQL bytes
+            }
         }
         return length;
     }
@@ -141,6 +146,12 @@ public final class LogRecordCodec {
                     buffer.putInt(entry.getKey());
                     buffer.putLong(entry.getValue());
                 }
+            }
+            case DDL -> {
+                DdlLogRecord d = (DdlLogRecord) record;
+                byte[] sqlBytes = d.getSql().getBytes(StandardCharsets.UTF_8);
+                buffer.putInt(sqlBytes.length);
+                buffer.put(sqlBytes);
             }
         }
 
@@ -261,6 +272,13 @@ public final class LogRecordCodec {
                 }
 
                 yield new CheckpointEndRecord(lsn, activeTxns, dirtyPages);
+            }
+            case DDL -> {
+                int sqlLen = buffer.getInt();
+                byte[] sqlBytes = new byte[sqlLen];
+                buffer.get(sqlBytes);
+                String sql = new String(sqlBytes, StandardCharsets.UTF_8);
+                yield new DdlLogRecord(lsn, prevLsn, txnId, sql);
             }
         };
 

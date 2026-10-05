@@ -64,6 +64,15 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     private String currentDbName = null; // lowercase key
     private dev.koradb.storage.wal.LogManager logManager = null;
     private dev.koradb.transaction.TransactionManager transactionManager = null;
+    private volatile boolean suppressWalLogging = false;
+
+    public void setSuppressWalLogging(boolean suppress) {
+        this.suppressWalLogging = suppress;
+    }
+
+    public boolean isSuppressWalLogging() {
+        return suppressWalLogging;
+    }
 
     public void setTransactionManager(dev.koradb.transaction.TransactionManager transactionManager) {
         this.transactionManager = transactionManager;
@@ -282,6 +291,19 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
 
         // Persist the schema to catalog.meta
         appendToMeta(dbDir, table);
+
+        if (logManager != null && !suppressWalLogging) {
+            StringBuilder sb = new StringBuilder("CREATE TABLE ").append(table.getName()).append(" (");
+            List<ColumnDef> cols = table.getSchema().columns();
+            for (int i = 0; i < cols.size(); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(cols.get(i).name()).append(" ").append(cols.get(i).dataType());
+            }
+            sb.append(")");
+            long lsn = logManager.appendDdl(0L, 0L, sb.toString());
+            logManager.flush(lsn);
+        }
+
         log.info("Created table '{}' in database '{}'", table.getName(), currentDbName);
     }
 
@@ -316,6 +338,12 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
 
         // Rewrite catalog.meta without this table
         rewriteMeta(dbDir(currentDbName));
+
+        if (logManager != null && !suppressWalLogging) {
+            long lsn = logManager.appendDdl(0L, 0L, "DROP TABLE " + tableName);
+            logManager.flush(lsn);
+        }
+
         log.info("Dropped table '{}' from database '{}'", tableName, currentDbName);
     }
 
@@ -611,6 +639,15 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
 
     public Collection<TableFile> getOpenTableFiles() {
         return Collections.unmodifiableCollection(openFiles.values());
+    }
+
+    public TableFile getTableFile(String tableName) {
+        if (tableName == null) return null;
+        return openFiles.get(tableName.toLowerCase());
+    }
+
+    public Path getDataDir() {
+        return dataDir;
     }
 
     private void closeOpenIndexes() {

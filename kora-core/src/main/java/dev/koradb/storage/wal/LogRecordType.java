@@ -43,7 +43,12 @@ public enum LogRecordType {
     /**
      * Indicates complete termination and cleanup of a transaction.
      */
-    END((byte) 8);
+    END((byte) 8),
+
+    /**
+     * Data Definition Language (DDL) record logging schema changes (CREATE/DROP TABLE/DATABASE).
+     */
+    DDL((byte) 9);
 
     private final byte code;
 
@@ -65,6 +70,7 @@ public enum LogRecordType {
             case 6 -> CHECKPOINT_END;
             case 7 -> CLR;
             case 8 -> END;
+            case 9 -> DDL;
             default -> throw new IllegalArgumentException("Unknown LogRecordType code: " + code);
         };
     }

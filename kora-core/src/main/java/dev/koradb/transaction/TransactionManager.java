@@ -82,6 +82,21 @@ public class TransactionManager {
      * Commits the active transaction and releases all held locks.
      * Enforces the Force-Log-at-Commit rule by flushing the WAL up to the commit record.
      */
+    @FunctionalInterface
+    public interface CommitHook {
+        void onCommit(long commitLsn);
+    }
+
+    private volatile CommitHook commitHook = null;
+
+    public void setCommitHook(CommitHook commitHook) {
+        this.commitHook = commitHook;
+    }
+
+    public CommitHook getCommitHook() {
+        return commitHook;
+    }
+
     public void commitTransaction(Transaction txn) {
         Objects.requireNonNull(txn, "txn must not be null");
         if (!txn.isActive()) {
@@ -89,11 +104,16 @@ public class TransactionManager {
         }
 
         log.debug("Committing transaction {}", txn.getId());
+        long commitLsn = 0L;
         dev.koradb.storage.wal.LogManager lm = activeLogManager();
         if (lm != null) {
-            long commitLsn = lm.appendCommit(txn.getId().value(), txn.getPrevLsn());
+            commitLsn = lm.appendCommit(txn.getId().value(), txn.getPrevLsn());
             txn.setPrevLsn(commitLsn);
             lm.flush(commitLsn);
+        }
+
+        if (commitHook != null && commitLsn > 0L) {
+            commitHook.onCommit(commitLsn);
         }
 
         txn.markCommitted();
@@ -126,7 +146,10 @@ public class TransactionManager {
 
         log.debug("Aborting transaction {} (applying undo actions)", txn.getId());
         txn.markAborted();
-        abortedTxnIds.put(txn.getId().value(), Boolean.TRUE);
+        boolean hadUndo = txn.hasUndoActions();
+        if (hadUndo) {
+            abortedTxnIds.put(txn.getId().value(), Boolean.TRUE);
+        }
 
         try {
             while (txn.hasUndoActions()) {
@@ -140,7 +163,7 @@ public class TransactionManager {
                 }
             }
             dev.koradb.storage.wal.LogManager lm = activeLogManager();
-            if (lm != null) {
+            if (lm != null && (hadUndo || txn.getPrevLsn() > 0)) {
                 long abortLsn = lm.appendAbort(txn.getId().value(), txn.getPrevLsn());
                 txn.setPrevLsn(abortLsn);
                 lm.flush(abortLsn);
@@ -153,10 +176,12 @@ public class TransactionManager {
     }
 
     public void recordCommitted(long txnId) {
+        abortedTxnIds.remove(txnId);
         committedTxnIds.put(txnId, Boolean.TRUE);
     }
 
     public void recordAborted(long txnId) {
+        committedTxnIds.remove(txnId);
         abortedTxnIds.put(txnId, Boolean.TRUE);
     }
 
@@ -164,6 +189,10 @@ public class TransactionManager {
         nextTxnId.updateAndGet(curr -> Math.max(curr, startId));
         this.initialTxnId = nextTxnId.get();
         log.info("Initialized nextTxnId to {} (initialTxnId={})", nextTxnId.get(), initialTxnId);
+    }
+
+    public void updateNextTxnId(long txnId) {
+        nextTxnId.updateAndGet(curr -> Math.max(curr, txnId));
     }
 
     public long getInitialTxnId() {

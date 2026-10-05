@@ -60,6 +60,11 @@
                 <artifactId>kora-cli</artifactId>
                 <version>${project.version}</version>
             </dependency>
+            <dependency>
+                <groupId>dev.koradb</groupId>
+                <artifactId>kora-replication</artifactId>
+                <version>${project.version}</version>
+            </dependency>
 
             <!-- JUnit 5 BOM — imports all junit.version-aligned artifacts -->
             <dependency>
