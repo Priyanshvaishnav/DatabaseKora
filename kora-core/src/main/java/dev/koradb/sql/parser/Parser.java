@@ -101,6 +101,9 @@ public final class Parser {
             case UPDATE   -> parseUpdate();
             case DELETE   -> parseDelete();
             case EXPLAIN  -> parseExplain();
+            case BEGIN    -> parseBegin();
+            case COMMIT   -> parseCommit();
+            case ROLLBACK -> parseRollback();
             default       -> throw new ParseException(
                     "Expected a SQL statement but found: '" + token.lexeme() + "'",
                     token.line());
@@ -540,6 +543,34 @@ public final class Parser {
     }
 
     // =========================================================================
+    // Transactions
+    // =========================================================================
+
+    private BeginStmt parseBegin() {
+        consume(BEGIN, "BEGIN");
+        if (check(TRANSACTION)) {
+            advance();
+        }
+        return new BeginStmt();
+    }
+
+    private CommitStmt parseCommit() {
+        consume(COMMIT, "COMMIT");
+        if (check(TRANSACTION)) {
+            advance();
+        }
+        return new CommitStmt();
+    }
+
+    private RollbackStmt parseRollback() {
+        consume(ROLLBACK, "ROLLBACK");
+        if (check(TRANSACTION)) {
+            advance();
+        }
+        return new RollbackStmt();
+    }
+
+    // =========================================================================
     // WHERE clause
     // =========================================================================
 
@@ -694,7 +725,7 @@ public final class Parser {
         return switch (type) {
             case COUNT, SUM, AVG, MIN, MAX, ORDER, BY, ASC, DESC, LIMIT, OFFSET,
                  INDEX, TABLE, DATABASE, USE, UNIQUE, ON, SET, VALUES, GROUP,
-                 EXPLAIN, ANALYZE -> true;
+                 EXPLAIN, ANALYZE, TRANSACTION -> true;
             default -> false;
         };
     }

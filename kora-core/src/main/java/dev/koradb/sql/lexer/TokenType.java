@@ -58,6 +58,7 @@ public enum TokenType {
     BEGIN,
     COMMIT,
     ROLLBACK,
+    TRANSACTION,
 
     // -------------------------------------------------------------------------
     // Keywords — Query
