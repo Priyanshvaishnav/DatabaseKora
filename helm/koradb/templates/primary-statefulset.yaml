@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "koradb.primary.fullname" . }}
+  labels:
+    {{- include "koradb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: primary
+spec:
+  serviceName: {{ include "koradb.primary.fullname" . }}-headless
+  replicas: {{ .Values.primary.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "koradb.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: primary
+  template:
+    metadata:
+      labels:
+        {{- include "koradb.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: primary
+    spec:
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: koradb
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "koradb.fullname" . }}-config
+          env:
+            - name: KORA_ROLE
+              value: "PRIMARY"
+            - name: KORA_HOST
+              value: "0.0.0.0"
+          ports:
+            - name: sql
+              containerPort: 8765
+            - name: replication
+              containerPort: 8766
+            - name: metrics
+              containerPort: 9100
+          resources:
+            {{- toYaml .Values.primary.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9100
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9100
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/koradb/data
+  {{- if .Values.primary.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "koradb.selectorLabels" . | nindent 10 }}
+          app.kubernetes.io/component: primary
+      spec:
+        accessModes: [ {{ .Values.primary.persistence.accessMode | quote }} ]
+        {{- if .Values.primary.persistence.storageClass }}
+        storageClassName: {{ .Values.primary.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.primary.persistence.size | quote }}
+  {{- else }}
+      volumes:
+        - name: data
+          emptyDir: {}
+  {{- end }}

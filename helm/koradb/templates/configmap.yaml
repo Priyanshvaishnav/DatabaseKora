@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "koradb.fullname" . }}-config
+  labels:
+    {{- include "koradb.labels" . | nindent 4 }}
+data:
+  KORA_PORT: {{ .Values.cluster.port | quote }}
+  KORA_DATA_DIR: "/var/lib/koradb/data"
+  KORA_REPLICATION_PORT: {{ .Values.cluster.replicationPort | quote }}
+  KORA_REPLICATION_MODE: {{ .Values.cluster.replicationMode | quote }}
+  KORA_METRICS_ENABLED: {{ .Values.metrics.enabled | quote }}
+  KORA_METRICS_PORT: {{ .Values.cluster.metricsPort | quote }}
+  JAVA_OPTS: {{ .Values.jvm.opts | quote }}

@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: koradb-primary
+  namespace: koradb
+  labels:
+    app.kubernetes.io/name: koradb
+    app.kubernetes.io/component: primary
+spec:
+  serviceName: koradb-primary-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: koradb
+      app.kubernetes.io/component: primary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: koradb
+        app.kubernetes.io/component: primary
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: koradb
+          image: koradb:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: koradb-config
+          env:
+            - name: KORA_ROLE
+              value: "PRIMARY"
+            - name: KORA_HOST
+              value: "0.0.0.0"
+          ports:
+            - name: sql
+              containerPort: 8765
+            - name: replication
+              containerPort: 8766
+            - name: metrics
+              containerPort: 9100
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9100
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9100
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/koradb/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: koradb
+          app.kubernetes.io/component: primary
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi

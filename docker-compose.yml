@@ -1,0 +1,161 @@
+services:
+  # ============================================================================
+  # Primary Database Node (Read/Write + Replication Master)
+  # ============================================================================
+  koradb-primary:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: koradb:latest
+    container_name: koradb-primary
+    environment:
+      - KORA_ROLE=PRIMARY
+      - KORA_HOST=0.0.0.0
+      - KORA_PORT=8765
+      - KORA_DATA_DIR=/var/lib/koradb/data
+      - KORA_REPLICATION_PORT=8766
+      - KORA_REPLICATION_MODE=ASYNC
+      - KORA_METRICS_ENABLED=true
+      - KORA_METRICS_PORT=9100
+      - JAVA_OPTS=-XX:MaxRAMPercentage=75.0 -XX:+UseZGC -XX:+ZGenerational
+    ports:
+      - "8765:8765"   # Client SQL TCP Port (Primary Writes)
+      - "8766:8766"   # WAL Streaming Replication Port
+      - "9100:9100"   # Prometheus Metrics & /health
+    volumes:
+      - primary-data:/var/lib/koradb/data
+    networks:
+      - koradb-cluster
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9100/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # ============================================================================
+  # Read Replica 1 (Read-Only MVCC + Replication Follower)
+  # ============================================================================
+  koradb-replica-1:
+    image: koradb:latest
+    container_name: koradb-replica-1
+    depends_on:
+      koradb-primary:
+        condition: service_healthy
+    environment:
+      - KORA_ROLE=REPLICA
+      - KORA_HOST=0.0.0.0
+      - KORA_PORT=8765
+      - KORA_DATA_DIR=/var/lib/koradb/data
+      - KORA_PRIMARY_HOST=koradb-primary
+      - KORA_PRIMARY_PORT=8766
+      - KORA_REPLICA_ID=replica-1
+      - KORA_REPLICATION_MODE=ASYNC
+      - KORA_METRICS_ENABLED=true
+      - KORA_METRICS_PORT=9100
+      - JAVA_OPTS=-XX:MaxRAMPercentage=75.0 -XX:+UseZGC -XX:+ZGenerational
+    ports:
+      - "8767:8765"   # Client SQL TCP Port (Replica 1 Reads)
+      - "9101:9100"   # Prometheus Metrics & /health (Replica 1)
+    volumes:
+      - replica-1-data:/var/lib/koradb/data
+    networks:
+      - koradb-cluster
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9100/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # ============================================================================
+  # Read Replica 2 (Read-Only MVCC + Replication Follower)
+  # ============================================================================
+  koradb-replica-2:
+    image: koradb:latest
+    container_name: koradb-replica-2
+    depends_on:
+      koradb-primary:
+        condition: service_healthy
+    environment:
+      - KORA_ROLE=REPLICA
+      - KORA_HOST=0.0.0.0
+      - KORA_PORT=8765
+      - KORA_DATA_DIR=/var/lib/koradb/data
+      - KORA_PRIMARY_HOST=koradb-primary
+      - KORA_PRIMARY_PORT=8766
+      - KORA_REPLICA_ID=replica-2
+      - KORA_REPLICATION_MODE=ASYNC
+      - KORA_METRICS_ENABLED=true
+      - KORA_METRICS_PORT=9100
+      - JAVA_OPTS=-XX:MaxRAMPercentage=75.0 -XX:+UseZGC -XX:+ZGenerational
+    ports:
+      - "8768:8765"   # Client SQL TCP Port (Replica 2 Reads)
+      - "9102:9100"   # Prometheus Metrics & /health (Replica 2)
+    volumes:
+      - replica-2-data:/var/lib/koradb/data
+    networks:
+      - koradb-cluster
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9100/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # ============================================================================
+  # Prometheus Time-Series Database
+  # ============================================================================
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: koradb-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - koradb-cluster
+    restart: unless-stopped
+
+  # ============================================================================
+  # Grafana Visualization Dashboards
+  # ============================================================================
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: koradb-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=koradb
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./kora-observability/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - koradb-cluster
+    restart: unless-stopped
+
+volumes:
+  primary-data:
+    name: koradb-primary-data
+  replica-1-data:
+    name: koradb-replica-1-data
+  replica-2-data:
+    name: koradb-replica-2-data
+  prometheus-data:
+    name: koradb-prometheus-data
+  grafana-data:
+    name: koradb-grafana-data
+
+networks:
+  koradb-cluster:
+    name: koradb-cluster
+    driver: bridge

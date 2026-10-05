@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: koradb-config
+  namespace: koradb
+  labels:
+    app.kubernetes.io/name: koradb
+    app.kubernetes.io/part-of: koradb
+data:
+  KORA_PORT: "8765"
+  KORA_DATA_DIR: "/var/lib/koradb/data"
+  KORA_REPLICATION_PORT: "8766"
+  KORA_REPLICATION_MODE: "ASYNC"
+  KORA_METRICS_ENABLED: "true"
+  KORA_METRICS_PORT: "9100"
+  JAVA_OPTS: "-XX:MaxRAMPercentage=75.0 -XX:+UseZGC -XX:+ZGenerational"

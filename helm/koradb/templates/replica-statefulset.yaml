@@ -1,0 +1,90 @@
+{{- if .Values.replica.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "koradb.replica.fullname" . }}
+  labels:
+    {{- include "koradb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+spec:
+  serviceName: {{ include "koradb.replica.fullname" . }}
+  replicas: {{ .Values.replica.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "koradb.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: replica
+  template:
+    metadata:
+      labels:
+        {{- include "koradb.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: replica
+    spec:
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: koradb
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "koradb.fullname" . }}-config
+          env:
+            - name: KORA_ROLE
+              value: "REPLICA"
+            - name: KORA_HOST
+              value: "0.0.0.0"
+            - name: KORA_PRIMARY_HOST
+              value: "{{ include "koradb.primary.fullname" . }}-0.{{ include "koradb.primary.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+            - name: KORA_PRIMARY_PORT
+              value: {{ .Values.cluster.replicationPort | quote }}
+            - name: KORA_REPLICA_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: sql
+              containerPort: 8765
+            - name: metrics
+              containerPort: 9100
+          resources:
+            {{- toYaml .Values.replica.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9100
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9100
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/koradb/data
+  {{- if .Values.replica.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "koradb.selectorLabels" . | nindent 10 }}
+          app.kubernetes.io/component: replica
+      spec:
+        accessModes: [ {{ .Values.replica.persistence.accessMode | quote }} ]
+        {{- if .Values.replica.persistence.storageClass }}
+        storageClassName: {{ .Values.replica.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.replica.persistence.size | quote }}
+  {{- else }}
+      volumes:
+        - name: data
+          emptyDir: {}
+  {{- end }}
+{{- end }}

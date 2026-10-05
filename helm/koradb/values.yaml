@@ -1,0 +1,74 @@
+# Default values for KoraDB Helm chart.
+
+image:
+  repository: koradb
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+cluster:
+  port: 8765
+  replicationPort: 8766
+  replicationMode: ASYNC  # ASYNC or SYNC
+  metricsPort: 9100
+
+primary:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 10Gi
+  service:
+    type: ClusterIP
+    port: 8765
+
+replica:
+  enabled: true
+  replicaCount: 2
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 10Gi
+  service:
+    type: ClusterIP
+    port: 8765
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: false
+    interval: 10s
+    scrapeTimeout: 5s
+    labels:
+      release: prometheus
+
+jvm:
+  opts: "-XX:MaxRAMPercentage=75.0 -XX:+UseZGC -XX:+ZGenerational"

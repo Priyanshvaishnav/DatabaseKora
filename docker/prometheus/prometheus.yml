@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "koradb-primary"
+    static_configs:
+      - targets: ["koradb-primary:9100"]
+        labels:
+          role: "primary"
+          cluster: "koradb-docker"
+
+  - job_name: "koradb-replicas"
+    static_configs:
+      - targets: ["koradb-replica-1:9100"]
+        labels:
+          role: "replica"
+          replica_id: "replica-1"
+          cluster: "koradb-docker"
+      - targets: ["koradb-replica-2:9100"]
+        labels:
+          role: "replica"
+          replica_id: "replica-2"
+          cluster: "koradb-docker"

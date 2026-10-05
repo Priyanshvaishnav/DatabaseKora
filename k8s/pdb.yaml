@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: koradb-replica-pdb
+  namespace: koradb
+  labels:
+    app.kubernetes.io/name: koradb
+    app.kubernetes.io/component: replica
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: koradb
+      app.kubernetes.io/component: replica
