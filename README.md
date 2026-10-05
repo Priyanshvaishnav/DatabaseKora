@@ -60,8 +60,8 @@ Storage Engine (Pages on disk)                        ← Phase 2
 | 4 | B+ Tree Index | ✅ Complete |
 | 5 | Query Execution (operator tree) | ✅ Complete |
 | 6 | Query Planner and Optimizer | ✅ Complete |
-| 7 | Transactions | 🔜 Next |
-| 8 | Write-Ahead Logging | ⬜ |
+| 7 | Transactions | ✅ Complete |
+| 8 | Write-Ahead Logging | 🔜 Next |
 | 9 | Crash Recovery | ⬜ |
 | 10 | MVCC | ⬜ |
 | 11 | Database Server + CLI | ⬜ |
@@ -119,6 +119,12 @@ System.out.print(result.toDisplayString());
 // ------+---------
 // Alice | 5000.0
 // Bob   | 3000.0
+
+// Explicit ACID Transactions & In-Flight Rollback
+db.execute("BEGIN");
+db.execute("UPDATE accounts SET balance = 6000.0 WHERE id = 1");
+db.execute("INSERT INTO accounts VALUES (3, 'Charlie', 4000.0, true)");
+db.execute("ROLLBACK"); // Cleanly restores accounts to pre-transaction state
 ```
 
 ---

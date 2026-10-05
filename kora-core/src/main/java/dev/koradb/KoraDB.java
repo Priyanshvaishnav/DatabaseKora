@@ -9,6 +9,10 @@ import dev.koradb.sql.ast.Statement;
 import dev.koradb.sql.lexer.Lexer;
 import dev.koradb.sql.lexer.Token;
 import dev.koradb.sql.parser.Parser;
+import dev.koradb.transaction.Transaction;
+import dev.koradb.transaction.TransactionManager;
+import dev.koradb.transaction.lock.DeadlockException;
+import dev.koradb.transaction.lock.LockManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,8 +54,11 @@ public final class KoraDB implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(KoraDB.class);
 
-    private final Catalog          catalog;
+    private final Catalog           catalog;
     private final StatementExecutor executor;
+    private final LockManager       lockManager;
+    private final TransactionManager transactionManager;
+    private final dev.koradb.session.Session defaultSession;
 
     /**
      * Creates a new KoraDB instance backed entirely by in-memory storage.
@@ -81,14 +88,45 @@ public final class KoraDB implements AutoCloseable {
      * @param catalog the catalog implementation to use; must not be null
      */
     public KoraDB(Catalog catalog) {
-        this.catalog  = catalog;
-        this.executor = new StatementExecutor();
+        this.catalog            = catalog;
+        this.executor           = new StatementExecutor();
+        this.lockManager        = new LockManager();
+        this.transactionManager = new TransactionManager(this.lockManager, this.catalog);
+        this.defaultSession     = new dev.koradb.session.Session(this.catalog);
         log.debug("KoraDB instance initialized ({})",
                 catalog.getClass().getSimpleName());
     }
 
     /**
-     * Executes a SQL statement and returns the result.
+     * Creates a new isolated client session for concurrent multi-transaction execution.
+     */
+    public dev.koradb.session.Session createSession() {
+        return new dev.koradb.session.Session(catalog);
+    }
+
+    /**
+     * Returns the default session used for standalone calls to {@link #execute(String)}.
+     */
+    public dev.koradb.session.Session getDefaultSession() {
+        return defaultSession;
+    }
+
+    /**
+     * Returns the lock manager used by this database instance.
+     */
+    public LockManager getLockManager() {
+        return lockManager;
+    }
+
+    /**
+     * Returns the transaction manager used by this database instance.
+     */
+    public TransactionManager getTransactionManager() {
+        return transactionManager;
+    }
+
+    /**
+     * Executes a SQL statement on the default session and returns the result.
      *
      * @param sql the SQL string to execute
      * @return the {@link QueryResult}
@@ -97,11 +135,80 @@ public final class KoraDB implements AutoCloseable {
      * @throws dev.koradb.exception.ExecutionException on runtime execution errors
      */
     public QueryResult execute(String sql) {
-        log.debug("execute: {}", sql);
+        return execute(defaultSession, sql);
+    }
+
+    /**
+     * Executes a SQL statement in the context of the provided session.
+     *
+     * @param session the client session
+     * @param sql     the SQL string to execute
+     * @return the {@link QueryResult}
+     */
+    public QueryResult execute(dev.koradb.session.Session session, String sql) {
+        log.debug("execute [session={}]: {}", session.getSessionId(), sql);
 
         List<Token> tokens    = new Lexer(sql).tokenize();
         Statement   statement = new Parser(tokens).parse();
-        return executor.execute(statement, catalog);
+        return execute(session, statement);
+    }
+
+    /**
+     * Executes a parsed SQL statement in the context of the provided session.
+     */
+    public QueryResult execute(dev.koradb.session.Session session, Statement statement) {
+        Catalog cat = session.getCatalog();
+
+        return switch (statement) {
+            case dev.koradb.sql.ast.BeginStmt s -> {
+                if (session.hasActiveTransaction()) {
+                    throw new dev.koradb.exception.ExecutionException("Transaction is already active");
+                }
+                dev.koradb.transaction.Transaction txn = transactionManager.beginTransaction();
+                session.setActiveTransaction(txn);
+                yield QueryResult.ddl();
+            }
+            case dev.koradb.sql.ast.CommitStmt s -> {
+                if (!session.hasActiveTransaction()) {
+                    throw new dev.koradb.exception.ExecutionException("No active transaction to commit");
+                }
+                transactionManager.commitTransaction(session.getActiveTransaction());
+                session.clearActiveTransaction();
+                yield QueryResult.ddl();
+            }
+            case dev.koradb.sql.ast.RollbackStmt s -> {
+                if (!session.hasActiveTransaction()) {
+                    throw new dev.koradb.exception.ExecutionException("No active transaction to rollback");
+                }
+                transactionManager.abortTransaction(session.getActiveTransaction(), cat);
+                session.clearActiveTransaction();
+                yield QueryResult.ddl();
+            }
+            default -> {
+                if (session.hasActiveTransaction()) {
+                    dev.koradb.transaction.Transaction txn = session.getActiveTransaction();
+                    try {
+                        yield executor.execute(statement, cat, txn, lockManager);
+                    } catch (dev.koradb.transaction.lock.DeadlockException de) {
+                        transactionManager.abortTransaction(txn, cat);
+                        session.clearActiveTransaction();
+                        throw de;
+                    }
+                } else if (session.isAutoCommit()) {
+                    dev.koradb.transaction.Transaction txn = transactionManager.beginTransaction();
+                    try {
+                        QueryResult res = executor.execute(statement, cat, txn, lockManager);
+                        transactionManager.commitTransaction(txn);
+                        yield res;
+                    } catch (Exception e) {
+                        transactionManager.abortTransaction(txn, cat);
+                        throw e;
+                    }
+                } else {
+                    yield executor.execute(statement, cat);
+                }
+            }
+        };
     }
 
     /**
@@ -113,7 +220,7 @@ public final class KoraDB implements AutoCloseable {
     }
 
     /**
-     * Closes this KoraDB instance, releasing all open file handles.
+     * Closes this KoraDB instance, releasing all open file handles and rolling back active transactions.
      *
      * <p>For disk-backed instances ({@link dev.koradb.catalog.DiskCatalog}),
      * this closes all open table files cleanly. Calling this method is
@@ -123,6 +230,13 @@ public final class KoraDB implements AutoCloseable {
      */
     @Override
     public void close() {
+        if (defaultSession.hasActiveTransaction()) {
+            try {
+                transactionManager.abortTransaction(defaultSession.getActiveTransaction(), catalog);
+            } catch (Exception e) {
+                log.warn("Error aborting active transaction during shutdown", e);
+            }
+        }
         if (catalog instanceof AutoCloseable ac) {
             try {
                 ac.close();

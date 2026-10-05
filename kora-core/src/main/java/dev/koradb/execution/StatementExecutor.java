@@ -4,7 +4,14 @@ import dev.koradb.catalog.*;
 import dev.koradb.exception.ExecutionException;
 import dev.koradb.exception.SchemaException;
 import dev.koradb.sql.ast.*;
+import dev.koradb.storage.RecordId;
 import dev.koradb.storage.TableFile;
+import dev.koradb.transaction.Transaction;
+import dev.koradb.transaction.lock.LockManager;
+import dev.koradb.transaction.lock.LockResource;
+import dev.koradb.transaction.undo.DeleteUndoAction;
+import dev.koradb.transaction.undo.InsertUndoAction;
+import dev.koradb.transaction.undo.UpdateUndoAction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -14,7 +21,7 @@ import java.time.format.DateTimeParseException;
 import java.util.*;
 
 /**
- * The main execution engine for Milestone 1.
+ * The main execution engine for KoraDB.
  *
  * <p>Walks the {@link Statement} AST and performs operations against the
  * {@link Catalog}. Each statement type is handled in its own private method.
@@ -23,9 +30,6 @@ import java.util.*;
  * <p>Using an exhaustive {@code switch} on the sealed {@link Statement} interface
  * ensures the compiler catches any new statement type added to the AST that
  * is not yet handled here.
- *
- * <h2>Thread safety</h2>
- * <p>Not thread-safe in M1. Concurrency support will be added in Phase 7.
  */
 public final class StatementExecutor {
 
@@ -38,32 +42,55 @@ public final class StatementExecutor {
     private final dev.koradb.planner.explain.ExplainExecutor explainExecutor = new dev.koradb.planner.explain.ExplainExecutor(queryPlanner);
 
     /**
-     * Executes a parsed SQL statement against the given catalog.
+     * Executes a parsed SQL statement against the given catalog without transaction/lock context.
      *
      * @param statement the parsed AST node to execute
      * @param catalog   the schema registry and row store
      * @return the result of execution
      */
     public QueryResult execute(Statement statement, Catalog catalog) {
+        return execute(statement, catalog, null, null);
+    }
+
+    /**
+     * Executes a parsed SQL statement against the given catalog within the context of a transaction
+     * and lock manager.
+     *
+     * @param statement   the parsed AST node to execute
+     * @param catalog     the schema registry and row store
+     * @param txn         active transaction (if any)
+     * @param lockManager lock manager for SS2PL concurrency control (if any)
+     * @return the result of execution
+     */
+    public QueryResult execute(Statement statement, Catalog catalog, Transaction txn, LockManager lockManager) {
         log.debug("Executing: {}", statement.getClass().getSimpleName());
 
         return switch (statement) {
             case CreateDatabaseStmt s -> executeCreateDatabase(s, catalog);
             case DropDatabaseStmt   s -> executeDropDatabase(s, catalog);
             case UseDatabaseStmt    s -> executeUseDatabase(s, catalog);
-            case CreateTableStmt    s -> executeCreateTable(s, catalog);
-            case DropTableStmt      s -> executeDropTable(s, catalog);
+            case CreateTableStmt    s -> executeCreateTable(s, catalog, txn, lockManager);
+            case DropTableStmt      s -> executeDropTable(s, catalog, txn, lockManager);
             case CreateIndexStmt    s -> executeCreateIndex(s, catalog);
             case DropIndexStmt      s -> executeDropIndex(s, catalog);
-            case InsertStmt         s -> executeInsert(s, catalog);
-            case SelectStmt         s -> executeSelect(s, catalog);
-            case UpdateStmt         s -> executeUpdate(s, catalog);
-            case DeleteStmt         s -> executeDelete(s, catalog);
-            case ExplainStmt        s -> executeExplain(s, catalog);
+            case InsertStmt         s -> executeInsert(s, catalog, txn, lockManager);
+            case SelectStmt         s -> executeSelect(s, catalog, txn, lockManager);
+            case UpdateStmt         s -> executeUpdate(s, catalog, txn, lockManager);
+            case DeleteStmt         s -> executeDelete(s, catalog, txn, lockManager);
+            case ExplainStmt        s -> executeExplain(s, catalog, txn, lockManager);
+            case BeginStmt          s -> QueryResult.ddl();
+            case CommitStmt         s -> QueryResult.ddl();
+            case RollbackStmt       s -> QueryResult.ddl();
         };
     }
 
-    private QueryResult executeExplain(ExplainStmt stmt, Catalog catalog) {
+    private QueryResult executeExplain(ExplainStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
+        if (txn != null && lockManager != null && stmt.statement() instanceof SelectStmt selectStmt) {
+            lockManager.acquireShared(txn.getId(), LockResource.table(selectStmt.tableName()));
+            if (selectStmt.join().isPresent()) {
+                lockManager.acquireShared(txn.getId(), LockResource.table(selectStmt.join().get().tableName()));
+            }
+        }
         log.debug("Executing EXPLAIN (analyze={})", stmt.analyze());
         return explainExecutor.execute(stmt, catalog);
     }
@@ -90,7 +117,10 @@ public final class StatementExecutor {
         return QueryResult.ddl();
     }
 
-    private QueryResult executeCreateTable(CreateTableStmt stmt, Catalog catalog) {
+    private QueryResult executeCreateTable(CreateTableStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
+        if (txn != null && lockManager != null) {
+            lockManager.acquireExclusive(txn.getId(), LockResource.table(stmt.tableName()));
+        }
         Schema schema = new Schema(stmt.columnDefs());
         Table  table  = new Table(stmt.tableName(), schema);
         catalog.createTable(table);
@@ -98,7 +128,10 @@ public final class StatementExecutor {
         return QueryResult.ddl();
     }
 
-    private QueryResult executeDropTable(DropTableStmt stmt, Catalog catalog) {
+    private QueryResult executeDropTable(DropTableStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
+        if (txn != null && lockManager != null) {
+            lockManager.acquireExclusive(txn.getId(), LockResource.table(stmt.tableName()));
+        }
         catalog.dropTable(stmt.tableName());
         log.info("Table '{}' dropped", stmt.tableName());
         return QueryResult.ddl();
@@ -120,7 +153,11 @@ public final class StatementExecutor {
     // INSERT
     // =========================================================================
 
-    private QueryResult executeInsert(InsertStmt stmt, Catalog catalog) {
+    private QueryResult executeInsert(InsertStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
+        if (txn != null && lockManager != null) {
+            lockManager.acquireExclusive(txn.getId(), LockResource.table(stmt.tableName()));
+        }
+
         Table  table  = catalog.getTable(stmt.tableName());
         Schema schema = table.getSchema();
 
@@ -141,7 +178,26 @@ public final class StatementExecutor {
             rowValues.put(col.name(), typed);
         }
 
-        table.insertRow(new Row(rowValues));
+        Row newRow = new Row(rowValues);
+        if (table instanceof DiskTable diskTable) {
+            TableFile tf = diskTable.getTableFile();
+            RecordId rid = tf.insertRow(newRow);
+            for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
+                Object val = newRow.get(idx.getColumnName());
+                if (val != null) {
+                    idx.insert(new dev.koradb.index.IndexKey(val, idx.getKeyType()), rid);
+                }
+            }
+            if (txn != null) {
+                txn.addUndoAction(new InsertUndoAction(stmt.tableName(), newRow, rid));
+            }
+        } else {
+            table.insertRow(newRow);
+            if (txn != null) {
+                txn.addUndoAction(new InsertUndoAction(stmt.tableName(), newRow));
+            }
+        }
+
         log.debug("Inserted 1 row into '{}'", stmt.tableName());
         return QueryResult.dml(1);
     }
@@ -150,7 +206,14 @@ public final class StatementExecutor {
     // SELECT
     // =========================================================================
 
-    private QueryResult executeSelect(SelectStmt stmt, Catalog catalog) {
+    private QueryResult executeSelect(SelectStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
+        if (txn != null && lockManager != null) {
+            lockManager.acquireShared(txn.getId(), LockResource.table(stmt.tableName()));
+            if (stmt.join().isPresent()) {
+                lockManager.acquireShared(txn.getId(), LockResource.table(stmt.join().get().tableName()));
+            }
+        }
+
         Table  table  = catalog.getTable(stmt.tableName());
         Schema schema = table.getSchema();
 
@@ -189,7 +252,11 @@ public final class StatementExecutor {
     // UPDATE
     // =========================================================================
 
-    private QueryResult executeUpdate(UpdateStmt stmt, Catalog catalog) {
+    private QueryResult executeUpdate(UpdateStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
+        if (txn != null && lockManager != null) {
+            lockManager.acquireExclusive(txn.getId(), LockResource.table(stmt.tableName()));
+        }
+
         Table  table     = catalog.getTable(stmt.tableName());
         Schema schema    = table.getSchema();
         var    evaluator = new ExpressionEvaluator(schema);
@@ -221,7 +288,8 @@ public final class StatementExecutor {
                         Object    typed = coerce(a.value().value(), col.dataType(), col.name());
                         newVals.put(a.columnName(), typed);
                     }
-                    tf.updateRow(rr.rid(), new Row(newVals));
+                    Row newRow = new Row(newVals);
+                    RecordId newRid = tf.updateRow(rr.rid(), newRow);
                     for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
                         Object oldVal = rr.row().get(idx.getColumnName());
                         Object newVal = newVals.get(idx.getColumnName());
@@ -230,9 +298,12 @@ public final class StatementExecutor {
                                 idx.delete(new dev.koradb.index.IndexKey(oldVal, idx.getKeyType()), rr.rid());
                             }
                             if (newVal != null) {
-                                idx.insert(new dev.koradb.index.IndexKey(newVal, idx.getKeyType()), rr.rid());
+                                idx.insert(new dev.koradb.index.IndexKey(newVal, idx.getKeyType()), newRid);
                             }
                         }
+                    }
+                    if (txn != null) {
+                        txn.addUndoAction(new UpdateUndoAction(stmt.tableName(), rr.row(), newRow, newRid));
                     }
                     count++;
                 }
@@ -241,10 +312,14 @@ public final class StatementExecutor {
             // In-memory path: mutate rows in-place
             for (Row row : table.mutableRows()) {
                 if (matchesWhere(row, stmt.where(), evaluator)) {
+                    Row oldSnapshot = row.copy();
                     for (UpdateStmt.Assignment a : stmt.assignments()) {
                         ColumnDef col   = schema.findColumn(a.columnName());
                         Object    typed = coerce(a.value().value(), col.dataType(), col.name());
                         row.set(a.columnName(), typed);
+                    }
+                    if (txn != null) {
+                        txn.addUndoAction(new UpdateUndoAction(stmt.tableName(), oldSnapshot, row));
                     }
                     count++;
                 }
@@ -259,7 +334,11 @@ public final class StatementExecutor {
     // DELETE
     // =========================================================================
 
-    private QueryResult executeDelete(DeleteStmt stmt, Catalog catalog) {
+    private QueryResult executeDelete(DeleteStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
+        if (txn != null && lockManager != null) {
+            lockManager.acquireExclusive(txn.getId(), LockResource.table(stmt.tableName()));
+        }
+
         Table  table     = catalog.getTable(stmt.tableName());
         Schema schema    = table.getSchema();
         var    evaluator = new ExpressionEvaluator(schema);
@@ -283,6 +362,9 @@ public final class StatementExecutor {
                             idx.delete(new dev.koradb.index.IndexKey(val, idx.getKeyType()), rr.rid());
                         }
                     }
+                    if (txn != null) {
+                        txn.addUndoAction(new DeleteUndoAction(stmt.tableName(), rr.row()));
+                    }
                     count++;
                 }
             }
@@ -294,6 +376,9 @@ public final class StatementExecutor {
                 Row row = mutable.get(i);
                 if (matchesWhere(row, stmt.where(), evaluator)) {
                     table.deleteRow(i);
+                    if (txn != null) {
+                        txn.addUndoAction(new DeleteUndoAction(stmt.tableName(), row));
+                    }
                     count++;
                 }
                 i--;

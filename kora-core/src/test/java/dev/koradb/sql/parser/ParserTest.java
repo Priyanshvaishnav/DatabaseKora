@@ -558,4 +558,43 @@ class ParserTest {
             assertThat(sel.columns()).containsExactly("id", "name");
         }
     }
+
+    // =========================================================================
+    // TRANSACTION STATEMENTS
+    // =========================================================================
+
+    @Nested
+    @DisplayName("TRANSACTION")
+    class Transactions {
+
+        @Test
+        @DisplayName("parses BEGIN and BEGIN TRANSACTION")
+        void parseBegin() {
+            Statement s1 = parse("BEGIN");
+            assertThat(s1).isInstanceOf(dev.koradb.sql.ast.BeginStmt.class);
+
+            Statement s2 = parse("BEGIN TRANSACTION");
+            assertThat(s2).isInstanceOf(dev.koradb.sql.ast.BeginStmt.class);
+        }
+
+        @Test
+        @DisplayName("parses COMMIT and COMMIT TRANSACTION")
+        void parseCommit() {
+            Statement s1 = parse("COMMIT");
+            assertThat(s1).isInstanceOf(dev.koradb.sql.ast.CommitStmt.class);
+
+            Statement s2 = parse("COMMIT TRANSACTION");
+            assertThat(s2).isInstanceOf(dev.koradb.sql.ast.CommitStmt.class);
+        }
+
+        @Test
+        @DisplayName("parses ROLLBACK and ROLLBACK TRANSACTION")
+        void parseRollback() {
+            Statement s1 = parse("ROLLBACK");
+            assertThat(s1).isInstanceOf(dev.koradb.sql.ast.RollbackStmt.class);
+
+            Statement s2 = parse("ROLLBACK TRANSACTION");
+            assertThat(s2).isInstanceOf(dev.koradb.sql.ast.RollbackStmt.class);
+        }
+    }
 }

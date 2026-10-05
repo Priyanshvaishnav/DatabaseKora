@@ -32,5 +32,8 @@ public sealed interface Statement
                 DeleteStmt,
                 CreateIndexStmt,
                 DropIndexStmt,
-                ExplainStmt {
+                ExplainStmt,
+                BeginStmt,
+                CommitStmt,
+                RollbackStmt {
 }
