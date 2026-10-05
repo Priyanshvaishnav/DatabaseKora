@@ -22,5 +22,10 @@ public enum IsolationLevel {
     /**
      * Highest isolation: Strict 2PL on all read/write sets, preventing phantoms and anomalies.
      */
-    SERIALIZABLE
+    SERIALIZABLE,
+
+    /**
+     * Snapshot Isolation: Reads observe a consistent point-in-time snapshot via MVCC without locking.
+     */
+    SNAPSHOT
 }

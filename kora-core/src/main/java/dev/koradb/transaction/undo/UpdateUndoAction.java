@@ -35,6 +35,7 @@ public class UpdateUndoAction implements UndoAction {
     @Override
     public void undo(Catalog catalog) {
         Table table = catalog.getTable(tableName);
+        oldRow.setXmax(0L);
         if (table instanceof DiskTable dt && newRecordId != null) {
             // Delete the updated version from disk and index
             dt.getTableFile().deleteRow(newRecordId);
@@ -44,10 +45,12 @@ public class UpdateUndoAction implements UndoAction {
                     idx.delete(new IndexKey(newVal, idx.getKeyType()), newRecordId);
                 }
             }
-            // Re-insert the old version
-            dt.insertRow(oldRow);
         } else {
-            // In-memory update: restore original field values directly
+            // In-memory update: restore original field values directly and remove newRow if separate
+            table.mutableRows().remove(newRow);
+            if (!table.mutableRows().contains(oldRow)) {
+                table.mutableRows().add(oldRow);
+            }
             for (Map.Entry<String, Object> entry : oldRow.values().entrySet()) {
                 newRow.set(entry.getKey(), entry.getValue());
             }

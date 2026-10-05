@@ -67,15 +67,16 @@ public class IndexScanOperator implements Operator {
     @Override
     public Row next() {
         if (rids == null) return null;
+        dev.koradb.mvcc.ReadView rv = dev.koradb.mvcc.MvccContext.getReadView();
         while (cursor < rids.size()) {
             RecordId rid = rids.get(cursor++);
-            Row raw = tableFile != null ? tableFile.readRow(rid) : null;
+            Row raw = tableFile != null ? tableFile.readRow(rid, rv) : null;
             if (raw != null) {
                 Map<String, Object> map = new LinkedHashMap<>(raw.values());
                 for (Map.Entry<String, Object> entry : raw.values().entrySet()) {
                     map.put(tableName + "." + entry.getKey(), entry.getValue());
                 }
-                return new Row(map);
+                return new Row(map, raw.getXmin(), raw.getXmax());
             }
         }
         return null;

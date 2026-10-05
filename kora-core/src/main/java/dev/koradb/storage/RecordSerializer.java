@@ -52,12 +52,31 @@ public final class RecordSerializer {
         this.schema = schema;
     }
 
+    public static final int HEADER_SIZE = 16; // 8 bytes xmin + 8 bytes xmax
+
+    public static long extractXmin(byte[] record) {
+        if (record == null || record.length < HEADER_SIZE) return 0L;
+        return java.nio.ByteBuffer.wrap(record).getLong(0);
+    }
+
+    public static long extractXmax(byte[] record) {
+        if (record == null || record.length < HEADER_SIZE) return 0L;
+        return java.nio.ByteBuffer.wrap(record).getLong(8);
+    }
+
+    public static void setXmax(byte[] record, long xmax) {
+        if (record != null && record.length >= HEADER_SIZE) {
+            java.nio.ByteBuffer.wrap(record).putLong(8, xmax);
+        }
+    }
+
     // =========================================================================
     // Serialization: Row → byte[]
     // =========================================================================
 
     /**
      * Serializes a {@link Row} into a byte array according to the schema.
+     * Includes the 16-byte MVCC version header ([xmin: 8B][xmax: 8B]).
      *
      * @param row the row to serialize; must have a value (or null) for every column
      * @return the serialized bytes, ready to write into a {@link SlottedPage}
@@ -83,12 +102,15 @@ public final class RecordSerializer {
         }
 
         // Compute total length
-        int total = bitmapBytes;
+        int total = HEADER_SIZE + bitmapBytes;
         for (byte[] b : encoded) total += b.length;
 
         // Second pass: write into a single array
         byte[] record = new byte[total];
-        int    pos    = 0;
+        java.nio.ByteBuffer.wrap(record).putLong(0, row.getXmin());
+        java.nio.ByteBuffer.wrap(record).putLong(8, row.getXmax());
+
+        int pos = HEADER_SIZE;
         System.arraycopy(nullBitmap, 0, record, pos, bitmapBytes);
         pos += bitmapBytes;
 
@@ -106,18 +128,31 @@ public final class RecordSerializer {
 
     /**
      * Deserializes a byte array back into a {@link Row} according to the schema.
+     * Reconstructs the {@link Row} along with its {@code xmin} and {@code xmax} coordinates.
      *
      * @param record the bytes previously produced by {@link #serialize}
      * @return a reconstructed {@link Row}
      */
     public Row deserialize(byte[] record) {
-        List<ColumnDef>      cols        = schema.columns();
-        int                  bitmapBytes = nullBitmapSize(cols.size());
-        byte[]               nullBitmap  = new byte[bitmapBytes];
-        System.arraycopy(record, 0, nullBitmap, 0, bitmapBytes);
+        List<ColumnDef> cols = schema.columns();
+        int bitmapBytes = nullBitmapSize(cols.size());
+
+        long xmin = 0L;
+        long xmax = 0L;
+        int headerOffset = 0;
+
+        if (record.length >= HEADER_SIZE + bitmapBytes) {
+            java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(record);
+            xmin = buf.getLong(0);
+            xmax = buf.getLong(8);
+            headerOffset = HEADER_SIZE;
+        }
+
+        byte[] nullBitmap = new byte[bitmapBytes];
+        System.arraycopy(record, headerOffset, nullBitmap, 0, bitmapBytes);
 
         Map<String, Object> values = new LinkedHashMap<>();
-        int pos = bitmapBytes;
+        int pos = headerOffset + bitmapBytes;
 
         for (int i = 0; i < cols.size(); i++) {
             ColumnDef col = cols.get(i);
@@ -130,7 +165,7 @@ public final class RecordSerializer {
             }
         }
 
-        return new Row(values);
+        return new Row(values, xmin, xmax);
     }
 
     // =========================================================================

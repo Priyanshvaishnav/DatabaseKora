@@ -22,7 +22,10 @@ public class TransactionManager {
     private static final Logger log = LoggerFactory.getLogger(TransactionManager.class);
 
     private final AtomicLong nextTxnId = new AtomicLong(1L);
+    private volatile long initialTxnId = 1L;
     private final ConcurrentMap<TransactionId, Transaction> activeTransactions = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Long, Boolean> committedTxnIds = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Long, Boolean> abortedTxnIds = new ConcurrentHashMap<>();
     private final LockManager lockManager;
     private final Catalog catalog;
     private final dev.koradb.storage.wal.LogManager logManager;
@@ -94,6 +97,7 @@ public class TransactionManager {
         }
 
         txn.markCommitted();
+        committedTxnIds.put(txn.getId().value(), Boolean.TRUE);
 
         // Release all SS2PL locks held by this transaction
         lockManager.releaseAll(txn.getId());
@@ -122,6 +126,7 @@ public class TransactionManager {
 
         log.debug("Aborting transaction {} (applying undo actions)", txn.getId());
         txn.markAborted();
+        abortedTxnIds.put(txn.getId().value(), Boolean.TRUE);
 
         try {
             while (txn.hasUndoActions()) {
@@ -145,6 +150,55 @@ public class TransactionManager {
             activeTransactions.remove(txn.getId());
         }
         log.info("Transaction {} aborted and rolled back", txn.getId());
+    }
+
+    public void recordCommitted(long txnId) {
+        committedTxnIds.put(txnId, Boolean.TRUE);
+    }
+
+    public void recordAborted(long txnId) {
+        abortedTxnIds.put(txnId, Boolean.TRUE);
+    }
+
+    public void initNextTxnId(long startId) {
+        nextTxnId.updateAndGet(curr -> Math.max(curr, startId));
+        this.initialTxnId = nextTxnId.get();
+        log.info("Initialized nextTxnId to {} (initialTxnId={})", nextTxnId.get(), initialTxnId);
+    }
+
+    public long getInitialTxnId() {
+        return initialTxnId;
+    }
+
+    public boolean isCommitted(long txnId) {
+        if (txnId == 0L) return true;
+        if (txnId < initialTxnId) {
+            return !abortedTxnIds.containsKey(txnId);
+        }
+        return committedTxnIds.containsKey(txnId);
+    }
+
+    public boolean isAborted(long txnId) {
+        return abortedTxnIds.containsKey(txnId);
+    }
+
+    public boolean isActive(long txnId) {
+        return activeTransactions.containsKey(new TransactionId(txnId));
+    }
+
+    public long getNextTxnId() {
+        return nextTxnId.get();
+    }
+
+    public dev.koradb.mvcc.ReadView createReadView(Transaction txn) {
+        long creatorId = txn != null ? txn.getId().value() : 0L;
+        java.util.Set<Long> activeIds = activeTransactions.keySet().stream()
+                .map(TransactionId::value)
+                .filter(id -> id != creatorId)
+                .collect(java.util.stream.Collectors.toSet());
+        long lowWatermark = activeIds.isEmpty() ? nextTxnId.get() : activeIds.stream().min(Long::compareTo).get();
+        long highWatermark = nextTxnId.get();
+        return new dev.koradb.mvcc.ReadView(creatorId, lowWatermark, highWatermark, activeIds, this::isCommitted, this::isAborted);
     }
 
     public dev.koradb.storage.wal.LogManager getLogManager() {

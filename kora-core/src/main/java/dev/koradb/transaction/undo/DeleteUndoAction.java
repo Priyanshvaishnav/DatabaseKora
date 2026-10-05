@@ -22,7 +22,10 @@ public class DeleteUndoAction implements UndoAction {
     @Override
     public void undo(Catalog catalog) {
         Table table = catalog.getTable(tableName);
-        table.insertRow(deletedRow);
+        deletedRow.setXmax(0L);
+        if (!table.mutableRows().contains(deletedRow)) {
+            table.insertRow(deletedRow);
+        }
     }
 
     public String getTableName() {

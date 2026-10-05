@@ -61,6 +61,16 @@ public class Session {
         this.autoCommit = autoCommit;
     }
 
+    private volatile dev.koradb.transaction.IsolationLevel defaultIsolationLevel = dev.koradb.transaction.IsolationLevel.SERIALIZABLE;
+
+    public dev.koradb.transaction.IsolationLevel getDefaultIsolationLevel() {
+        return defaultIsolationLevel;
+    }
+
+    public void setDefaultIsolationLevel(dev.koradb.transaction.IsolationLevel defaultIsolationLevel) {
+        this.defaultIsolationLevel = Objects.requireNonNull(defaultIsolationLevel, "defaultIsolationLevel must not be null");
+    }
+
     @Override
     public String toString() {
         return "Session{" +

@@ -27,10 +27,41 @@ import java.util.Objects;
 public final class Row {
 
     private final Map<String, Object> values;
+    private long xmin;
+    private long xmax;
 
     public Row(Map<String, Object> values) {
-        // LinkedHashMap to preserve column order
+        this(values, 0L, 0L);
+    }
+
+    public Row(Map<String, Object> values, long xmin, long xmax) {
         this.values = new LinkedHashMap<>(values);
+        this.xmin = xmin;
+        this.xmax = xmax;
+    }
+
+    public long getXmin() {
+        return xmin;
+    }
+
+    public void setXmin(long xmin) {
+        this.xmin = xmin;
+    }
+
+    public long getXmax() {
+        return xmax;
+    }
+
+    public void setXmax(long xmax) {
+        this.xmax = xmax;
+    }
+
+    public Row withXmax(long xmax) {
+        return new Row(this.values, this.xmin, xmax);
+    }
+
+    public Row withXmin(long xmin) {
+        return new Row(this.values, xmin, this.xmax);
     }
 
     /** Returns the value for the given column name, or {@code null} if absent. */
@@ -71,7 +102,7 @@ public final class Row {
 
     /** Creates a shallow copy of this row (used during UPDATE to avoid aliasing). */
     public Row copy() {
-        return new Row(new LinkedHashMap<>(values));
+        return new Row(new LinkedHashMap<>(values), xmin, xmax);
     }
 
     @Override

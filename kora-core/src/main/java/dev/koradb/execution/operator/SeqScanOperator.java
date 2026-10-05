@@ -21,24 +21,31 @@ public class SeqScanOperator implements Operator {
     private final Table table;
     private final String tableName;
     private final Schema schema;
+    private final dev.koradb.mvcc.ReadView readView;
     private Iterator<Row> iterator;
 
     public SeqScanOperator(Table table) {
-        this(table, table.getName());
+        this(table, table.getName(), null);
     }
 
     public SeqScanOperator(Table table, String tableName) {
+        this(table, tableName, null);
+    }
+
+    public SeqScanOperator(Table table, String tableName, dev.koradb.mvcc.ReadView readView) {
         this.table = table;
         this.tableName = tableName;
         this.schema = table.getSchema();
+        this.readView = readView;
     }
 
     @Override
     public void open() {
+        dev.koradb.mvcc.ReadView rv = this.readView != null ? this.readView : dev.koradb.mvcc.MvccContext.getReadView();
         if (table instanceof DiskTable diskTable) {
-            this.iterator = diskTable.getTableFile().scanAll().iterator();
+            this.iterator = diskTable.getRows(rv).iterator();
         } else {
-            this.iterator = table.getRows().iterator();
+            this.iterator = table.getRows(rv).iterator();
         }
     }
 

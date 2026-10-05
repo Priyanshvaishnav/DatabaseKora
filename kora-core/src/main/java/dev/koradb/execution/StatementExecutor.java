@@ -6,7 +6,11 @@ import dev.koradb.exception.SchemaException;
 import dev.koradb.sql.ast.*;
 import dev.koradb.storage.RecordId;
 import dev.koradb.storage.TableFile;
+import dev.koradb.mvcc.MvccContext;
+import dev.koradb.mvcc.ReadView;
+import dev.koradb.transaction.IsolationLevel;
 import dev.koradb.transaction.Transaction;
+import dev.koradb.transaction.TransactionManager;
 import dev.koradb.transaction.lock.LockManager;
 import dev.koradb.transaction.lock.LockResource;
 import dev.koradb.transaction.undo.DeleteUndoAction;
@@ -49,7 +53,7 @@ public final class StatementExecutor {
      * @return the result of execution
      */
     public QueryResult execute(Statement statement, Catalog catalog) {
-        return execute(statement, catalog, null, null);
+        return execute(statement, catalog, null, null, null);
     }
 
     /**
@@ -63,6 +67,21 @@ public final class StatementExecutor {
      * @return the result of execution
      */
     public QueryResult execute(Statement statement, Catalog catalog, Transaction txn, LockManager lockManager) {
+        return execute(statement, catalog, txn, lockManager, null);
+    }
+
+    /**
+     * Executes a parsed SQL statement against the given catalog within the context of a transaction,
+     * lock manager, and transaction manager for MVCC snapshot isolation.
+     *
+     * @param statement   the parsed AST node to execute
+     * @param catalog     the schema registry and row store
+     * @param txn         active transaction (if any)
+     * @param lockManager lock manager for SS2PL concurrency control (if any)
+     * @param txnManager  transaction manager for ReadView snapshots (if any)
+     * @return the result of execution
+     */
+    public QueryResult execute(Statement statement, Catalog catalog, Transaction txn, LockManager lockManager, TransactionManager txnManager) {
         log.debug("Executing: {}", statement.getClass().getSimpleName());
 
         return switch (statement) {
@@ -74,9 +93,9 @@ public final class StatementExecutor {
             case CreateIndexStmt    s -> executeCreateIndex(s, catalog);
             case DropIndexStmt      s -> executeDropIndex(s, catalog);
             case InsertStmt         s -> executeInsert(s, catalog, txn, lockManager);
-            case SelectStmt         s -> executeSelect(s, catalog, txn, lockManager);
-            case UpdateStmt         s -> executeUpdate(s, catalog, txn, lockManager);
-            case DeleteStmt         s -> executeDelete(s, catalog, txn, lockManager);
+            case SelectStmt         s -> executeSelect(s, catalog, txn, lockManager, txnManager);
+            case UpdateStmt         s -> executeUpdate(s, catalog, txn, lockManager, txnManager);
+            case DeleteStmt         s -> executeDelete(s, catalog, txn, lockManager, txnManager);
             case ExplainStmt        s -> executeExplain(s, catalog, txn, lockManager);
             case BeginStmt          s -> QueryResult.ddl();
             case CommitStmt         s -> QueryResult.ddl();
@@ -85,7 +104,7 @@ public final class StatementExecutor {
     }
 
     private QueryResult executeExplain(ExplainStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
-        if (txn != null && lockManager != null && stmt.statement() instanceof SelectStmt selectStmt) {
+        if (txn != null && lockManager != null && txn.getIsolationLevel() == IsolationLevel.SERIALIZABLE && stmt.statement() instanceof SelectStmt selectStmt) {
             lockManager.acquireShared(txn.getId(), LockResource.table(selectStmt.tableName()));
             if (selectStmt.join().isPresent()) {
                 lockManager.acquireShared(txn.getId(), LockResource.table(selectStmt.join().get().tableName()));
@@ -154,7 +173,7 @@ public final class StatementExecutor {
     // =========================================================================
 
     private QueryResult executeInsert(InsertStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
-        if (txn != null && lockManager != null) {
+        if (txn != null && lockManager != null && txn.getIsolationLevel() == IsolationLevel.SERIALIZABLE) {
             lockManager.acquireExclusive(txn.getId(), LockResource.table(stmt.tableName()));
         }
 
@@ -192,9 +211,11 @@ public final class StatementExecutor {
                 txn.addUndoAction(new InsertUndoAction(stmt.tableName(), newRow, rid));
             }
         } else {
-            table.insertRow(newRow);
             if (txn != null) {
+                table.insertRow(newRow, txn);
                 txn.addUndoAction(new InsertUndoAction(stmt.tableName(), newRow));
+            } else {
+                table.insertRow(newRow);
             }
         }
 
@@ -206,187 +227,260 @@ public final class StatementExecutor {
     // SELECT
     // =========================================================================
 
-    private QueryResult executeSelect(SelectStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
-        if (txn != null && lockManager != null) {
-            lockManager.acquireShared(txn.getId(), LockResource.table(stmt.tableName()));
-            if (stmt.join().isPresent()) {
-                lockManager.acquireShared(txn.getId(), LockResource.table(stmt.join().get().tableName()));
-            }
-        }
-
-        Table  table  = catalog.getTable(stmt.tableName());
-        Schema schema = table.getSchema();
-
-        // Validate projected columns exist if simple projection without JOIN
-        if (stmt.join().isEmpty() && !stmt.isSelectStar()) {
-            for (SelectItem item : stmt.selectItems()) {
-                if (!item.isAggregate()) {
-                    String col = item.expression();
-                    if (!schema.hasColumn(col) && (!col.contains(".") || !schema.hasColumn(col.substring(col.indexOf('.') + 1)))) {
-                        throw new SchemaException(
-                                "Column '%s' does not exist in table '%s'".formatted(col, stmt.tableName()));
+    private QueryResult executeSelect(SelectStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager, TransactionManager txnManager) {
+        if (txn != null) {
+            if (txn.getIsolationLevel() == IsolationLevel.SERIALIZABLE) {
+                if (lockManager != null) {
+                    lockManager.acquireShared(txn.getId(), LockResource.table(stmt.tableName()));
+                    if (stmt.join().isPresent()) {
+                        lockManager.acquireShared(txn.getId(), LockResource.table(stmt.join().get().tableName()));
                     }
+                }
+            }
+            if (txnManager != null) {
+                ReadView readView;
+                if (txn.getIsolationLevel() == IsolationLevel.READ_COMMITTED) {
+                    readView = txnManager.createReadView(txn);
+                } else {
+                    readView = txn.getOrCreateReadView(() -> txnManager.createReadView(txn));
+                }
+                if (readView != null) {
+                    MvccContext.setReadView(readView);
                 }
             }
         }
 
-        dev.koradb.planner.physical.PhysicalPlan compiled = queryPlanner.plan(stmt, catalog).physicalPlan();
-        dev.koradb.execution.operator.Operator plan = compiled.rootOperator();
-        plan.open();
-        List<Row> rows = new ArrayList<>();
         try {
-            Row r;
-            while ((r = plan.next()) != null) {
-                rows.add(r);
-            }
-        } finally {
-            plan.close();
-        }
+            Table  table  = catalog.getTable(stmt.tableName());
+            Schema schema = table.getSchema();
 
-        List<String> outputCols = plan.getSchema().columns().stream().map(ColumnDef::name).toList();
-        log.debug("SELECT returned {} row(s) from '{}' (plan cost: {})", rows.size(), stmt.tableName(), compiled.cost().format());
-        return QueryResult.select(rows, outputCols);
+            // Validate projected columns exist if simple projection without JOIN
+            if (stmt.join().isEmpty() && !stmt.isSelectStar()) {
+                for (SelectItem item : stmt.selectItems()) {
+                    if (!item.isAggregate()) {
+                        String col = item.expression();
+                        if (!schema.hasColumn(col) && (!col.contains(".") || !schema.hasColumn(col.substring(col.indexOf('.') + 1)))) {
+                            throw new SchemaException(
+                                    "Column '%s' does not exist in table '%s'".formatted(col, stmt.tableName()));
+                        }
+                    }
+                }
+            }
+
+            dev.koradb.planner.physical.PhysicalPlan compiled = queryPlanner.plan(stmt, catalog).physicalPlan();
+            dev.koradb.execution.operator.Operator plan = compiled.rootOperator();
+            plan.open();
+            List<Row> rows = new ArrayList<>();
+            try {
+                Row r;
+                while ((r = plan.next()) != null) {
+                    rows.add(r);
+                }
+            } finally {
+                plan.close();
+            }
+
+            List<String> outputCols = plan.getSchema().columns().stream().map(ColumnDef::name).toList();
+            log.debug("SELECT returned {} row(s) from '{}' (plan cost: {})", rows.size(), stmt.tableName(), compiled.cost().format());
+            return QueryResult.select(rows, outputCols);
+        } finally {
+            MvccContext.clear();
+        }
     }
 
     // =========================================================================
     // UPDATE
     // =========================================================================
 
-    private QueryResult executeUpdate(UpdateStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
-        if (txn != null && lockManager != null) {
+    private QueryResult executeUpdate(UpdateStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager, TransactionManager txnManager) {
+        if (txn != null && lockManager != null && txn.getIsolationLevel() == IsolationLevel.SERIALIZABLE) {
             lockManager.acquireExclusive(txn.getId(), LockResource.table(stmt.tableName()));
         }
 
-        Table  table     = catalog.getTable(stmt.tableName());
-        Schema schema    = table.getSchema();
-        var    evaluator = new ExpressionEvaluator(schema);
-
-        if (stmt.where().isEmpty()) {
-            log.warn("UPDATE '{}' has no WHERE clause — all rows will be updated",
-                    stmt.tableName());
-        }
-
-        // Validate assignment columns
-        for (UpdateStmt.Assignment assignment : stmt.assignments()) {
-            if (!schema.hasColumn(assignment.columnName())) {
-                throw new SchemaException(
-                        "Column '%s' does not exist in table '%s'"
-                                .formatted(assignment.columnName(), stmt.tableName()));
+        if (txn != null && txnManager != null) {
+            ReadView readView;
+            if (txn.getIsolationLevel() == IsolationLevel.READ_COMMITTED) {
+                readView = txnManager.createReadView(txn);
+            } else {
+                readView = txn.getOrCreateReadView(() -> txnManager.createReadView(txn));
+            }
+            if (readView != null) {
+                MvccContext.setReadView(readView);
             }
         }
 
-        int count = 0;
+        try {
+            Table  table     = catalog.getTable(stmt.tableName());
+            Schema schema    = table.getSchema();
+            var    evaluator = new ExpressionEvaluator(schema);
 
-        if (table instanceof DiskTable diskTable) {
-            // Disk path: scan with RIDs, delete + reinsert each matched row
-            TableFile tf = diskTable.getTableFile();
-            for (TableFile.RidRow rr : tf.scanWithRids()) {
-                if (matchesWhere(rr.row(), stmt.where(), evaluator)) {
-                    Map<String, Object> newVals = new LinkedHashMap<>(rr.row().values());
-                    for (UpdateStmt.Assignment a : stmt.assignments()) {
-                        ColumnDef col   = schema.findColumn(a.columnName());
-                        Object    typed = coerce(a.value().value(), col.dataType(), col.name());
-                        newVals.put(a.columnName(), typed);
-                    }
-                    Row newRow = new Row(newVals);
-                    RecordId newRid = tf.updateRow(rr.rid(), newRow, txn);
-                    for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
-                        Object oldVal = rr.row().get(idx.getColumnName());
-                        Object newVal = newVals.get(idx.getColumnName());
-                        if (!java.util.Objects.equals(oldVal, newVal)) {
-                            if (oldVal != null) {
-                                idx.delete(new dev.koradb.index.IndexKey(oldVal, idx.getKeyType()), rr.rid());
-                            }
-                            if (newVal != null) {
-                                idx.insert(new dev.koradb.index.IndexKey(newVal, idx.getKeyType()), newRid);
+            if (stmt.where().isEmpty()) {
+                log.warn("UPDATE '{}' has no WHERE clause — all rows will be updated",
+                        stmt.tableName());
+            }
+
+            // Validate assignment columns
+            for (UpdateStmt.Assignment assignment : stmt.assignments()) {
+                if (!schema.hasColumn(assignment.columnName())) {
+                    throw new SchemaException(
+                            "Column '%s' does not exist in table '%s'"
+                                    .formatted(assignment.columnName(), stmt.tableName()));
+                }
+            }
+
+            int count = 0;
+
+            if (table instanceof DiskTable diskTable) {
+                // Disk path: scan with RIDs, delete + reinsert each matched row
+                TableFile tf = diskTable.getTableFile();
+                for (TableFile.RidRow rr : tf.scanWithRids()) {
+                    if (matchesWhere(rr.row(), stmt.where(), evaluator)) {
+                        Map<String, Object> newVals = new LinkedHashMap<>(rr.row().values());
+                        for (UpdateStmt.Assignment a : stmt.assignments()) {
+                            ColumnDef col   = schema.findColumn(a.columnName());
+                            Object    typed = coerce(a.value().value(), col.dataType(), col.name());
+                            newVals.put(a.columnName(), typed);
+                        }
+                        Row newRow = new Row(newVals);
+                        RecordId newRid = tf.updateRow(rr.rid(), newRow, txn);
+                        for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
+                            Object oldVal = rr.row().get(idx.getColumnName());
+                            Object newVal = newVals.get(idx.getColumnName());
+                            if (!java.util.Objects.equals(oldVal, newVal)) {
+                                if (oldVal != null) {
+                                    idx.delete(new dev.koradb.index.IndexKey(oldVal, idx.getKeyType()), rr.rid());
+                                }
+                                if (newVal != null) {
+                                    idx.insert(new dev.koradb.index.IndexKey(newVal, idx.getKeyType()), newRid);
+                                }
                             }
                         }
+                        if (txn != null) {
+                            txn.addUndoAction(new UpdateUndoAction(stmt.tableName(), rr.row(), newRow, newRid));
+                        }
+                        count++;
                     }
-                    if (txn != null) {
-                        txn.addUndoAction(new UpdateUndoAction(stmt.tableName(), rr.row(), newRow, newRid));
+                }
+            } else {
+                if (txn != null) {
+                    List<Row> visible = table.getRows();
+                    for (Row row : visible) {
+                        if (matchesWhere(row, stmt.where(), evaluator)) {
+                            Map<String, Object> newVals = new LinkedHashMap<>(row.values());
+                            for (UpdateStmt.Assignment a : stmt.assignments()) {
+                                ColumnDef col   = schema.findColumn(a.columnName());
+                                Object    typed = coerce(a.value().value(), col.dataType(), col.name());
+                                newVals.put(a.columnName(), typed);
+                            }
+                            Row newRow = new Row(newVals);
+                            table.updateRow(row, newRow, txn);
+                            txn.addUndoAction(new UpdateUndoAction(stmt.tableName(), row, newRow));
+                            count++;
+                        }
                     }
-                    count++;
+                } else {
+                    // In-memory path: mutate rows in-place
+                    for (Row row : table.mutableRows()) {
+                        if (matchesWhere(row, stmt.where(), evaluator)) {
+                            for (UpdateStmt.Assignment a : stmt.assignments()) {
+                                ColumnDef col   = schema.findColumn(a.columnName());
+                                Object    typed = coerce(a.value().value(), col.dataType(), col.name());
+                                row.set(a.columnName(), typed);
+                            }
+                            count++;
+                        }
+                    }
                 }
             }
-        } else {
-            // In-memory path: mutate rows in-place
-            for (Row row : table.mutableRows()) {
-                if (matchesWhere(row, stmt.where(), evaluator)) {
-                    Row oldSnapshot = row.copy();
-                    for (UpdateStmt.Assignment a : stmt.assignments()) {
-                        ColumnDef col   = schema.findColumn(a.columnName());
-                        Object    typed = coerce(a.value().value(), col.dataType(), col.name());
-                        row.set(a.columnName(), typed);
-                    }
-                    if (txn != null) {
-                        txn.addUndoAction(new UpdateUndoAction(stmt.tableName(), oldSnapshot, row));
-                    }
-                    count++;
-                }
-            }
-        }
 
-        log.debug("UPDATE '{}' affected {} row(s)", stmt.tableName(), count);
-        return QueryResult.dml(count);
+            log.debug("UPDATE '{}' affected {} row(s)", stmt.tableName(), count);
+            return QueryResult.dml(count);
+        } finally {
+            MvccContext.clear();
+        }
     }
 
     // =========================================================================
     // DELETE
     // =========================================================================
 
-    private QueryResult executeDelete(DeleteStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
-        if (txn != null && lockManager != null) {
+    private QueryResult executeDelete(DeleteStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager, TransactionManager txnManager) {
+        if (txn != null && lockManager != null && txn.getIsolationLevel() == IsolationLevel.SERIALIZABLE) {
             lockManager.acquireExclusive(txn.getId(), LockResource.table(stmt.tableName()));
         }
 
-        Table  table     = catalog.getTable(stmt.tableName());
-        Schema schema    = table.getSchema();
-        var    evaluator = new ExpressionEvaluator(schema);
-
-        if (stmt.where().isEmpty()) {
-            log.warn("DELETE FROM '{}' has no WHERE clause — all rows will be deleted",
-                    stmt.tableName());
+        if (txn != null && txnManager != null) {
+            ReadView readView;
+            if (txn.getIsolationLevel() == IsolationLevel.READ_COMMITTED) {
+                readView = txnManager.createReadView(txn);
+            } else {
+                readView = txn.getOrCreateReadView(() -> txnManager.createReadView(txn));
+            }
+            if (readView != null) {
+                MvccContext.setReadView(readView);
+            }
         }
 
-        int count = 0;
+        try {
+            Table  table     = catalog.getTable(stmt.tableName());
+            Schema schema    = table.getSchema();
+            var    evaluator = new ExpressionEvaluator(schema);
 
-        if (table instanceof DiskTable diskTable) {
-            // Disk path: scan with RIDs, delete each matched slot
-            TableFile tf = diskTable.getTableFile();
-            for (TableFile.RidRow rr : tf.scanWithRids()) {
-                if (matchesWhere(rr.row(), stmt.where(), evaluator)) {
-                    tf.deleteRow(rr.rid(), txn);
-                    for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
-                        Object val = rr.row().get(idx.getColumnName());
-                        if (val != null) {
-                            idx.delete(new dev.koradb.index.IndexKey(val, idx.getKeyType()), rr.rid());
+            if (stmt.where().isEmpty()) {
+                log.warn("DELETE FROM '{}' has no WHERE clause — all rows will be deleted",
+                        stmt.tableName());
+            }
+
+            int count = 0;
+
+            if (table instanceof DiskTable diskTable) {
+                // Disk path: scan with RIDs, delete each matched slot
+                TableFile tf = diskTable.getTableFile();
+                for (TableFile.RidRow rr : tf.scanWithRids()) {
+                    if (matchesWhere(rr.row(), stmt.where(), evaluator)) {
+                        tf.deleteRow(rr.rid(), txn);
+                        for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
+                            Object val = rr.row().get(idx.getColumnName());
+                            if (val != null) {
+                                idx.delete(new dev.koradb.index.IndexKey(val, idx.getKeyType()), rr.rid());
+                            }
+                        }
+                        if (txn != null) {
+                            txn.addUndoAction(new DeleteUndoAction(stmt.tableName(), rr.row()));
+                        }
+                        count++;
+                    }
+                }
+            } else {
+                if (txn != null) {
+                    List<Row> visible = table.getRows();
+                    for (Row row : visible) {
+                        if (matchesWhere(row, stmt.where(), evaluator)) {
+                            table.deleteRow(row, txn);
+                            txn.addUndoAction(new DeleteUndoAction(stmt.tableName(), row));
+                            count++;
                         }
                     }
-                    if (txn != null) {
-                        txn.addUndoAction(new DeleteUndoAction(stmt.tableName(), rr.row()));
+                } else {
+                    // In-memory path: reverse-index delete to avoid index shifting
+                    List<Row> mutable = table.mutableRows();
+                    int i = mutable.size() - 1;
+                    while (i >= 0) {
+                        Row row = mutable.get(i);
+                        if (matchesWhere(row, stmt.where(), evaluator)) {
+                            table.deleteRow(i);
+                            count++;
+                        }
+                        i--;
                     }
-                    count++;
                 }
             }
-        } else {
-            // In-memory path: reverse-index delete to avoid index shifting
-            List<Row> mutable = table.mutableRows();
-            int i = mutable.size() - 1;
-            while (i >= 0) {
-                Row row = mutable.get(i);
-                if (matchesWhere(row, stmt.where(), evaluator)) {
-                    table.deleteRow(i);
-                    if (txn != null) {
-                        txn.addUndoAction(new DeleteUndoAction(stmt.tableName(), row));
-                    }
-                    count++;
-                }
-                i--;
-            }
-        }
 
-        log.debug("DELETE FROM '{}' removed {} row(s)", stmt.tableName(), count);
-        return QueryResult.dml(count);
+            log.debug("DELETE FROM '{}' removed {} row(s)", stmt.tableName(), count);
+            return QueryResult.dml(count);
+        } finally {
+            MvccContext.clear();
+        }
     }
 
     // =========================================================================
