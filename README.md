@@ -4,7 +4,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-blue)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Build-Maven-orange)](https://maven.apache.org/)
-[![Status](https://img.shields.io/badge/Milestone-14%20Docker%20%2B%20Kubernetes-green)](#milestones)
+[![Status](https://img.shields.io/badge/Milestone-15%20Benchmarks-green)](#milestones)
 
 ---
 
@@ -68,8 +68,8 @@ Storage Engine (Pages on disk)                        ← Phase 2
 | 12 | Replication | ✅ Complete |
 | 13 | Observability | ✅ Complete |
 | 14 | Docker + Kubernetes | ✅ Complete |
-| 15 | Benchmarks | 🔜 Next |
-| 16 | AI Layer | ⬜ |
+| 15 | Benchmarks | ✅ Complete |
+| 16 | AI Layer | 🔜 Next |
 
 ---
 
@@ -245,6 +245,20 @@ docker run -it --rm --network host koradb:latest cli -h 127.0.0.1 -p 8767
 
 # Deploy to Kubernetes via Helm 3
 helm install koradb ./helm/koradb -n koradb --create-namespace
+```
+
+### Benchmarks (JMH & Micro-Harness)
+
+```bash
+# Run the fast built-in micro-harness across all 7 engine subsystems
+java -jar benchmarks/target/benchmarks.jar --quick
+
+# Run specific subsystem suite (e.g. buffer pool, transactions, btree, network)
+java -jar benchmarks/target/benchmarks.jar --suite buffer
+java -jar benchmarks/target/benchmarks.jar --suite tx
+
+# Run with full JMH harness (forked JVMs, statistical warmups & iterations)
+java -jar benchmarks/target/benchmarks.jar --jmh
 ```
 
 ---
