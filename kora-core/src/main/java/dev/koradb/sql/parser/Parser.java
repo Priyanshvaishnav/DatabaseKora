@@ -300,24 +300,35 @@ public final class Parser {
     // =========================================================================
 
     /**
-     * {@code SELECT (*|col,...) FROM <table> [WHERE <cond>]}
+     * {@code SELECT (*|item,...) FROM <table> [JOIN ...] [WHERE <cond>] [GROUP BY ...] [ORDER BY ...] [LIMIT ... [OFFSET ...]]}
      */
     private SelectStmt parseSelect() {
         consume(SELECT, "SELECT");
 
-        List<String> columns = new ArrayList<>();
+        List<SelectItem> selectItems = new ArrayList<>();
         if (check(STAR)) {
-            advance(); // SELECT *
+            advance(); // SELECT * -> selectItems remains empty
         } else {
-            columns.add(consumeIdentifier("column name"));
+            selectItems.add(parseSelectItem());
             while (check(COMMA)) {
                 advance();
-                columns.add(consumeIdentifier("column name"));
+                selectItems.add(parseSelectItem());
             }
         }
 
         consume(FROM, "FROM");
         String tableName = consumeIdentifier("table name");
+
+        // Optional JOIN: [INNER] JOIN <tableName> ON <condition>
+        Optional<JoinClause> join = Optional.empty();
+        if (check(INNER)) {
+            advance();
+            consume(JOIN, "JOIN");
+            join = Optional.of(parseJoinClause());
+        } else if (check(JOIN)) {
+            advance();
+            join = Optional.of(parseJoinClause());
+        }
 
         Optional<WhereClause> where = Optional.empty();
         if (check(WHERE)) {
@@ -325,7 +336,129 @@ public final class Parser {
             where = Optional.of(parseWhereClause());
         }
 
-        return new SelectStmt(columns, tableName, where);
+        // Optional GROUP BY: GROUP BY <column>
+        Optional<String> groupBy = Optional.empty();
+        if (check(GROUP)) {
+            advance();
+            consume(BY, "BY");
+            groupBy = Optional.of(consumeQualifiedIdentifier("group by column"));
+        }
+
+        // Optional ORDER BY: ORDER BY <col> [ASC | DESC] [, ...]
+        List<OrderItem> orderBy = new ArrayList<>();
+        if (check(ORDER)) {
+            advance();
+            consume(BY, "BY");
+            orderBy.add(parseOrderItem());
+            while (check(COMMA)) {
+                advance();
+                orderBy.add(parseOrderItem());
+            }
+        }
+
+        // Optional LIMIT: LIMIT <count> [OFFSET <offset>]
+        Optional<Integer> limit = Optional.empty();
+        Optional<Integer> offset = Optional.empty();
+        if (check(LIMIT)) {
+            advance();
+            limit = Optional.of(parseIntegerLiteral("LIMIT count"));
+            if (check(OFFSET)) {
+                advance();
+                offset = Optional.of(parseIntegerLiteral("OFFSET count"));
+            }
+        } else if (check(OFFSET)) {
+            advance();
+            offset = Optional.of(parseIntegerLiteral("OFFSET count"));
+        }
+
+        return new SelectStmt(selectItems, tableName, join, where, groupBy, orderBy, limit, offset);
+    }
+
+    private SelectItem parseSelectItem() {
+        Token token = peek();
+        AggregateType aggType = null;
+        switch (token.type()) {
+            case COUNT -> aggType = AggregateType.COUNT;
+            case SUM   -> aggType = AggregateType.SUM;
+            case AVG   -> aggType = AggregateType.AVG;
+            case MIN   -> aggType = AggregateType.MIN;
+            case MAX   -> aggType = AggregateType.MAX;
+            default    -> {}
+        }
+
+        if (aggType != null) {
+            advance(); // consume aggregate keyword
+            consume(LPAREN, "(");
+            String col;
+            if (aggType == AggregateType.COUNT && check(STAR)) {
+                advance(); // COUNT(*)
+                col = "*";
+            } else {
+                col = consumeQualifiedIdentifier("column name inside " + aggType);
+            }
+            consume(RPAREN, ")");
+
+            String alias = null;
+            if (check(AS)) {
+                advance();
+                alias = consumeIdentifier("alias");
+            } else if (peek().type() == IDENTIFIER) {
+                alias = advance().lexeme();
+            }
+
+            return SelectItem.aggregate(aggType, col, alias);
+        }
+
+        String colName = consumeQualifiedIdentifier("column name");
+        String alias = null;
+        if (check(AS)) {
+            advance();
+            alias = consumeIdentifier("alias");
+        } else if (peek().type() == IDENTIFIER) {
+            alias = advance().lexeme();
+        }
+
+        return alias != null ? SelectItem.column(colName, alias) : SelectItem.column(colName);
+    }
+
+    private JoinClause parseJoinClause() {
+        String tableName = consumeIdentifier("joined table name");
+        consume(ON, "ON");
+        BinaryExpr condition = parsePredicate();
+        return new JoinClause(tableName, condition);
+    }
+
+    private OrderItem parseOrderItem() {
+        String colName = consumeQualifiedIdentifier("ORDER BY column");
+        boolean ascending = true;
+        if (check(ASC)) {
+            advance();
+        } else if (check(DESC)) {
+            advance();
+            ascending = false;
+        }
+        return new OrderItem(colName, ascending);
+    }
+
+    private int parseIntegerLiteral(String context) {
+        Token token = peek();
+        if (token.type() == LITERAL_INT) {
+            advance();
+            return Integer.parseInt(token.lexeme());
+        }
+        throw new ParseException(
+                "Expected integer for %s but found: '%s'".formatted(context, token.lexeme()),
+                token.line());
+    }
+
+    private String consumeQualifiedIdentifier(String context) {
+        String name = consumeIdentifier(context);
+        if (check(DOT)) {
+            advance();
+            String sub = consumeIdentifier("column name");
+            return name + "." + sub;
+        }
+        return name;
     }
 
     // =========================================================================
@@ -410,13 +543,18 @@ public final class Parser {
     }
 
     /**
-     * Parses a single comparison predicate: {@code column op literal}.
+     * Parses a single comparison predicate: {@code column op (literal | column)}.
      */
     private BinaryExpr parsePredicate() {
-        String colName = consumeIdentifier("column name in predicate");
+        String leftCol = consumeQualifiedIdentifier("column name in predicate");
         Operator op    = parseOperator();
-        LiteralExpr rhs = parseLiteral();
-        return new BinaryExpr(new ColumnRefExpr(colName), op, rhs);
+        Expression rhs;
+        if (peek().type() == IDENTIFIER) {
+            rhs = new ColumnRefExpr(consumeQualifiedIdentifier("column name in predicate"));
+        } else {
+            rhs = parseLiteral();
+        }
+        return new BinaryExpr(new ColumnRefExpr(leftCol), op, rhs);
     }
 
     private Operator parseOperator() {
@@ -516,16 +654,23 @@ public final class Parser {
     }
 
     /**
-     * Consumes the current token as an identifier.
-     * Throws if the current token is not an {@code IDENTIFIER}.
+     * Consumes the current token as an identifier (or keyword used as identifier/alias).
      */
     private String consumeIdentifier(String context) {
-        if (!check(IDENTIFIER)) {
-            Token found = peek();
-            throw new ParseException(
-                    "Expected %s (identifier) but found: '%s'".formatted(context, found.lexeme()),
-                    found.line());
+        Token found = peek();
+        if (found.type() == IDENTIFIER || isKeywordAsIdentifier(found.type())) {
+            return advance().lexeme();
         }
-        return advance().lexeme();
+        throw new ParseException(
+                "Expected %s (identifier) but found: '%s'".formatted(context, found.lexeme()),
+                found.line());
+    }
+
+    private boolean isKeywordAsIdentifier(TokenType type) {
+        return switch (type) {
+            case COUNT, SUM, AVG, MIN, MAX, ORDER, BY, ASC, DESC, LIMIT, OFFSET,
+                 INDEX, TABLE, DATABASE, USE, UNIQUE, ON, SET, VALUES, GROUP -> true;
+            default -> false;
+        };
     }
 }

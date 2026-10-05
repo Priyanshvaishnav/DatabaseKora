@@ -142,79 +142,38 @@ public final class StatementExecutor {
     // =========================================================================
 
     private QueryResult executeSelect(SelectStmt stmt, Catalog catalog) {
-        Table  table     = catalog.getTable(stmt.tableName());
-        Schema schema    = table.getSchema();
-        var    evaluator = new ExpressionEvaluator(schema);
+        Table  table  = catalog.getTable(stmt.tableName());
+        Schema schema = table.getSchema();
 
-        // Determine which columns to project
-        List<String> projectedCols = stmt.isSelectStar()
-                ? schema.columns().stream().map(ColumnDef::name).toList()
-                : stmt.columns();
-
-        // Validate projected columns exist
-        for (String col : projectedCols) {
-            if (!schema.hasColumn(col)) {
-                throw new SchemaException(
-                        "Column '%s' does not exist in table '%s'"
-                                .formatted(col, stmt.tableName()));
-            }
-        }
-
-        // Filter using index if applicable, otherwise table scan
-        List<Row> filtered = fetchFilteredRows(table, stmt, evaluator, catalog);
-
-        // Project
-        List<Row> projected = filtered.stream()
-                .map(row -> projectRow(row, projectedCols))
-                .toList();
-
-        log.debug("SELECT returned {} row(s) from '{}'", projected.size(), stmt.tableName());
-        return QueryResult.select(projected, projectedCols);
-    }
-
-    private List<Row> fetchFilteredRows(Table table, SelectStmt stmt, ExpressionEvaluator evaluator, Catalog catalog) {
-        if (stmt.where().isPresent() && table instanceof dev.koradb.catalog.DiskTable diskTable) {
-            for (BinaryExpr bin : stmt.where().get().predicates()) {
-                if (bin.operator() == Operator.EQ) {
-                    String col = null;
-                    Object val = null;
-                    if (bin.left() instanceof ColumnRefExpr cref && bin.right() instanceof LiteralExpr lit) {
-                        col = cref.columnName();
-                        val = lit.value();
-                    } else if (bin.right() instanceof ColumnRefExpr cref && bin.left() instanceof LiteralExpr lit) {
-                        col = cref.columnName();
-                        val = lit.value();
-                    }
-
-                    if (col != null && val != null) {
-                        var indexOpt = catalog.getIndexForColumn(stmt.tableName(), col);
-                        if (indexOpt.isPresent()) {
-                            var index = indexOpt.get();
-                            Object coercedVal = coerce(val, index.getKeyType(), col);
-                            var key = new dev.koradb.index.IndexKey(coercedVal, index.getKeyType());
-                            List<dev.koradb.storage.RecordId> rids = index.isUnique()
-                                    ? index.search(key).map(List::of).orElse(List.of())
-                                    : index.searchAll(key);
-
-                            List<Row> rows = new ArrayList<>();
-                            for (dev.koradb.storage.RecordId rid : rids) {
-                                Row r = diskTable.getTableFile().readRow(rid);
-                                if (r != null && matchesWhere(r, stmt.where(), evaluator)) {
-                                    rows.add(r);
-                                }
-                            }
-                            log.debug("Index scan using '{}' matched {} row(s)", index.getName(), rows.size());
-                            return rows;
-                        }
+        // Validate projected columns exist if simple projection without JOIN
+        if (stmt.join().isEmpty() && !stmt.isSelectStar()) {
+            for (SelectItem item : stmt.selectItems()) {
+                if (!item.isAggregate()) {
+                    String col = item.expression();
+                    if (!schema.hasColumn(col) && (!col.contains(".") || !schema.hasColumn(col.substring(col.indexOf('.') + 1)))) {
+                        throw new SchemaException(
+                                "Column '%s' does not exist in table '%s'".formatted(col, stmt.tableName()));
                     }
                 }
             }
         }
 
-        // Full table scan fallback
-        return table.getRows().stream()
-                .filter(row -> matchesWhere(row, stmt.where(), evaluator))
-                .toList();
+        dev.koradb.execution.operator.Operator plan =
+                dev.koradb.execution.operator.PhysicalPlanBuilder.build(stmt, catalog);
+        plan.open();
+        List<Row> rows = new ArrayList<>();
+        try {
+            Row r;
+            while ((r = plan.next()) != null) {
+                rows.add(r);
+            }
+        } finally {
+            plan.close();
+        }
+
+        List<String> outputCols = plan.getSchema().columns().stream().map(ColumnDef::name).toList();
+        log.debug("SELECT returned {} row(s) from '{}'", rows.size(), stmt.tableName());
+        return QueryResult.select(rows, outputCols);
     }
 
     // =========================================================================

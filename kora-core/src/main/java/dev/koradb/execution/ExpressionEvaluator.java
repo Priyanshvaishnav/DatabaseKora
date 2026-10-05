@@ -86,12 +86,7 @@ public final class ExpressionEvaluator {
 
     private Object resolveLeft(Expression left, Row row) {
         if (left instanceof ColumnRefExpr ref) {
-            String colName = ref.columnName();
-            if (!schema.hasColumn(colName)) {
-                throw new SchemaException(
-                        "Column '%s' does not exist".formatted(colName));
-            }
-            return row.get(colName);
+            return resolveColumnValue(ref.columnName(), row);
         }
         if (left instanceof LiteralExpr lit) {
             return lit.value();
@@ -108,9 +103,42 @@ public final class ExpressionEvaluator {
             return lit.value();
         }
         if (right instanceof ColumnRefExpr ref) {
-            return row.get(ref.columnName());
+            return resolveColumnValue(ref.columnName(), row);
         }
         throw new ExecutionException("Unsupported right-hand expression: " + right.getClass().getSimpleName());
+    }
+
+    private Object resolveColumnValue(String colName, Row row) {
+        if (schema != null && schema.hasColumn(colName)) {
+            Object val = row.get(colName);
+            if (val != null) return val;
+        }
+        if (colName.contains(".")) {
+            String shortName = colName.substring(colName.indexOf('.') + 1);
+            if (schema != null && schema.hasColumn(shortName)) {
+                Object val = row.get(shortName);
+                if (val != null) return val;
+            }
+        }
+
+        Object direct = row.get(colName);
+        if (direct != null) return direct;
+        if (colName.contains(".")) {
+            String shortName = colName.substring(colName.indexOf('.') + 1);
+            Object shortVal = row.get(shortName);
+            if (shortVal != null) return shortVal;
+        } else {
+            for (java.util.Map.Entry<String, Object> entry : row.values().entrySet()) {
+                if (entry.getKey().endsWith("." + colName)) {
+                    return entry.getValue();
+                }
+            }
+        }
+
+        if (schema != null && !schema.hasColumn(colName) && (!colName.contains(".") || !schema.hasColumn(colName.substring(colName.indexOf('.') + 1)))) {
+            throw new SchemaException("Column '%s' does not exist".formatted(colName));
+        }
+        return row.get(colName);
     }
 
     /**
