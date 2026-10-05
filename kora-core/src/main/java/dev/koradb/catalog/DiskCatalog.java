@@ -344,6 +344,48 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
                 .toList();
     }
 
+    @Override
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public TableStatistics getTableStatistics(String tableName) {
+        Table table = getTable(tableName);
+        List<Row> rows = table.getRows();
+        long rowCount = rows.size();
+        int pageCount = 1;
+        if (table instanceof DiskTable dt) {
+            pageCount = Math.max(1, dt.getTableFile().pageCount());
+        }
+
+        Map<String, ColumnStatistics> colStats = new HashMap<>();
+        for (ColumnDef col : table.getSchema().columns()) {
+            Set<Object> distinctValues = new HashSet<>();
+            long nulls = 0;
+            Comparable min = null;
+            Comparable max = null;
+
+            for (Row r : rows) {
+                Object val = r.get(col.name());
+                if (val == null) {
+                    nulls++;
+                } else {
+                    distinctValues.add(val);
+                    if (val instanceof Comparable c) {
+                        if (min == null || c.compareTo(min) < 0) min = c;
+                        if (max == null || c.compareTo(max) > 0) max = c;
+                    }
+                }
+            }
+            colStats.put(col.name(), new ColumnStatistics(
+                    col.name(),
+                    Math.max(1, distinctValues.size()),
+                    nulls,
+                    min,
+                    max
+            ));
+        }
+
+        return new TableStatistics(tableName, rowCount, pageCount, colStats);
+    }
+
     // =========================================================================
     // catalog.meta persistence
     // =========================================================================

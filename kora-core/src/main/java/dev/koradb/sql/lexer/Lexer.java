@@ -74,6 +74,7 @@ public final class Lexer {
             Map.entry("COMMIT",    TokenType.COMMIT),
             Map.entry("ROLLBACK",  TokenType.ROLLBACK),
             Map.entry("EXPLAIN",   TokenType.EXPLAIN),
+            Map.entry("ANALYZE",   TokenType.ANALYZE),
             Map.entry("INT",       TokenType.INT),
             Map.entry("BIGINT",    TokenType.BIGINT),
             Map.entry("BOOLEAN",   TokenType.BOOLEAN),

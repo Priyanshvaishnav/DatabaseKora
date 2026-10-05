@@ -31,5 +31,6 @@ public sealed interface Statement
                 UpdateStmt,
                 DeleteStmt,
                 CreateIndexStmt,
-                DropIndexStmt {
+                DropIndexStmt,
+                ExplainStmt {
 }

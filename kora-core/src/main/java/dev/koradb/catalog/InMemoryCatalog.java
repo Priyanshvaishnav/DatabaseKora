@@ -1,15 +1,12 @@
 package dev.koradb.catalog;
 
 import dev.koradb.exception.SchemaException;
+import dev.koradb.sql.ast.ColumnDef;
 import dev.koradb.sql.ast.DataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.util.*;
 
 /**
  * In-memory implementation of {@link Catalog}.
@@ -201,6 +198,45 @@ public final class InMemoryCatalog implements Catalog {
         return indexes.values().stream()
                 .filter(idx -> idx.getTableName().equalsIgnoreCase(tableName))
                 .toList();
+    }
+
+    @Override
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public TableStatistics getTableStatistics(String tableName) {
+        Table table = getTable(tableName);
+        List<Row> rows = table.getRows();
+        long rowCount = rows.size();
+        int pageCount = Math.max(1, (int) Math.ceil(rowCount / 50.0));
+
+        Map<String, ColumnStatistics> colStats = new HashMap<>();
+        for (ColumnDef col : table.getSchema().columns()) {
+            Set<Object> distinctValues = new HashSet<>();
+            long nulls = 0;
+            Comparable min = null;
+            Comparable max = null;
+
+            for (Row r : rows) {
+                Object val = r.get(col.name());
+                if (val == null) {
+                    nulls++;
+                } else {
+                    distinctValues.add(val);
+                    if (val instanceof Comparable c) {
+                        if (min == null || c.compareTo(min) < 0) min = c;
+                        if (max == null || c.compareTo(max) > 0) max = c;
+                    }
+                }
+            }
+            colStats.put(col.name(), new ColumnStatistics(
+                    col.name(),
+                    Math.max(1, distinctValues.size()),
+                    nulls,
+                    min,
+                    max
+            ));
+        }
+
+        return new TableStatistics(tableName, rowCount, pageCount, colStats);
     }
 
     private static class InMemoryIndex implements dev.koradb.index.Index {

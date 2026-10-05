@@ -524,4 +524,38 @@ class ParserTest {
                     .isInstanceOf(IllegalArgumentException.class);
         }
     }
+
+    // =========================================================================
+    // EXPLAIN [ANALYZE]
+    // =========================================================================
+
+    @Nested
+    @DisplayName("EXPLAIN")
+    class Explain {
+
+        @Test
+        @DisplayName("parses EXPLAIN SELECT")
+        void basicExplain() {
+            Statement stmt = parse("EXPLAIN SELECT * FROM users");
+            assertThat(stmt).isInstanceOf(ExplainStmt.class);
+            ExplainStmt explain = (ExplainStmt) stmt;
+            assertThat(explain.analyze()).isFalse();
+            assertThat(explain.statement()).isInstanceOf(SelectStmt.class);
+            SelectStmt sel = (SelectStmt) explain.statement();
+            assertThat(sel.tableName()).isEqualTo("users");
+        }
+
+        @Test
+        @DisplayName("parses EXPLAIN ANALYZE SELECT")
+        void explainAnalyze() {
+            Statement stmt = parse("EXPLAIN ANALYZE SELECT id, name FROM users WHERE id = 1");
+            assertThat(stmt).isInstanceOf(ExplainStmt.class);
+            ExplainStmt explain = (ExplainStmt) stmt;
+            assertThat(explain.analyze()).isTrue();
+            assertThat(explain.statement()).isInstanceOf(SelectStmt.class);
+            SelectStmt sel = (SelectStmt) explain.statement();
+            assertThat(sel.tableName()).isEqualTo("users");
+            assertThat(sel.columns()).containsExactly("id", "name");
+        }
+    }
 }

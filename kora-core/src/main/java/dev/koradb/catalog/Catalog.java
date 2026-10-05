@@ -126,4 +126,9 @@ public interface Catalog {
      * Returns all indexes for a given table.
      */
     List<dev.koradb.index.Index> getIndexesForTable(String tableName);
+
+    /**
+     * Returns table statistics (row count, page count, NDV per column) for query planning.
+     */
+    TableStatistics getTableStatistics(String tableName);
 }
