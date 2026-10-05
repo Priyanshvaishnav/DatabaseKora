@@ -311,6 +311,55 @@ class ParserTest {
             SelectStmt s = (SelectStmt) parse("SELECT * FROM t WHERE id " + op + " 1");
             return s.where().get().predicates().get(0).operator();
         }
+
+        @Test
+        @DisplayName("SELECT with ORDER BY ASC and DESC")
+        void withOrderBy() {
+            Statement stmt = parse("SELECT name, age FROM users ORDER BY age DESC, name ASC");
+            SelectStmt s = (SelectStmt) stmt;
+            assertThat(s.orderBy()).hasSize(2);
+            assertThat(s.orderBy().get(0).columnName()).isEqualTo("age");
+            assertThat(s.orderBy().get(0).ascending()).isFalse();
+            assertThat(s.orderBy().get(1).columnName()).isEqualTo("name");
+            assertThat(s.orderBy().get(1).ascending()).isTrue();
+        }
+
+        @Test
+        @DisplayName("SELECT with LIMIT and OFFSET")
+        void withLimitAndOffset() {
+            Statement stmt = parse("SELECT * FROM users LIMIT 10 OFFSET 5");
+            SelectStmt s = (SelectStmt) stmt;
+            assertThat(s.limit()).contains(10);
+            assertThat(s.offset()).contains(5);
+        }
+
+        @Test
+        @DisplayName("SELECT with JOIN ON condition")
+        void withJoin() {
+            Statement stmt = parse("SELECT u.name, o.total FROM users JOIN orders ON users.id = orders.user_id");
+            SelectStmt s = (SelectStmt) stmt;
+            assertThat(s.join()).isPresent();
+            JoinClause j = s.join().get();
+            assertThat(j.tableName()).isEqualTo("orders");
+            assertThat(j.onCondition().operator()).isEqualTo(Operator.EQ);
+            assertThat(((ColumnRefExpr) j.onCondition().left()).columnName()).isEqualTo("users.id");
+            assertThat(((ColumnRefExpr) j.onCondition().right()).columnName()).isEqualTo("orders.user_id");
+        }
+
+        @Test
+        @DisplayName("SELECT with GROUP BY and aggregate functions")
+        void withGroupByAndAggregates() {
+            Statement stmt = parse("SELECT dept, COUNT(*) AS emp_count, AVG(salary) FROM employees GROUP BY dept");
+            SelectStmt s = (SelectStmt) stmt;
+            assertThat(s.groupBy()).contains("dept");
+            assertThat(s.selectItems()).hasSize(3);
+            assertThat(s.selectItems().get(0).expression()).isEqualTo("dept");
+            assertThat(s.selectItems().get(1).isAggregate()).isTrue();
+            assertThat(s.selectItems().get(1).aggregateType()).isEqualTo(AggregateType.COUNT);
+            assertThat(s.selectItems().get(1).alias()).isEqualTo("emp_count");
+            assertThat(s.selectItems().get(2).isAggregate()).isTrue();
+            assertThat(s.selectItems().get(2).aggregateType()).isEqualTo(AggregateType.AVG);
+        }
     }
 
     // =========================================================================

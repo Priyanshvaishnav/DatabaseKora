@@ -35,7 +35,28 @@ public final class Row {
 
     /** Returns the value for the given column name, or {@code null} if absent. */
     public Object get(String columnName) {
-        return values.get(columnName);
+        if (columnName == null) return null;
+        Object val = values.get(columnName);
+        if (val != null) return val;
+
+        // Case-insensitive direct match
+        for (Map.Entry<String, Object> entry : values.entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(columnName)) {
+                return entry.getValue();
+            }
+        }
+
+        // Table-prefixed or short name match (case-insensitive)
+        String targetShort = columnName.contains(".") ? columnName.substring(columnName.indexOf('.') + 1) : columnName;
+        for (Map.Entry<String, Object> entry : values.entrySet()) {
+            String key = entry.getKey();
+            String keyShort = key.contains(".") ? key.substring(key.indexOf('.') + 1) : key;
+            if (keyShort.equalsIgnoreCase(targetShort) || key.equalsIgnoreCase(columnName)) {
+                return entry.getValue();
+            }
+        }
+
+        return null;
     }
 
     /** Sets (or overwrites) a value for the given column name. */

@@ -25,7 +25,7 @@ public enum TokenType {
     USE,
 
     // -------------------------------------------------------------------------
-    // Keywords — DML
+    // Keywords — DML & Query
     // -------------------------------------------------------------------------
     INSERT,
     INTO,
@@ -36,6 +36,21 @@ public enum TokenType {
     UPDATE,
     SET,
     DELETE,
+    ORDER,
+    BY,
+    ASC,
+    DESC,
+    LIMIT,
+    OFFSET,
+    JOIN,
+    INNER,
+    GROUP,
+    AS,
+    COUNT,
+    SUM,
+    AVG,
+    MIN,
+    MAX,
 
     // -------------------------------------------------------------------------
     // Keywords — Transactions (placeholder for Phase 7)
