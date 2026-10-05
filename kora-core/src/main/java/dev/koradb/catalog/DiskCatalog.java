@@ -171,16 +171,43 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
             openFiles.put(table.getName().toLowerCase(),
                           new TableFile(table.getSchema(), filePath, bp));
         });
-        // Pre-open BPlusTree handles for all existing indexes
+
+        // Run ARIES Crash Recovery if WAL contains records
+        boolean recovered = false;
+        dev.koradb.storage.recovery.RecoveryManager recoveryManager =
+                new dev.koradb.storage.recovery.RecoveryManager(walPath, logManager, openFiles::get, openFiles::values);
+        if (recoveryManager.needsRecovery()) {
+            dev.koradb.storage.recovery.RecoveryResult recoveryResult = recoveryManager.recover();
+            if (recoveryResult.hasRecoveredChanges()) {
+                log.info("Recovered database '{}': {}", name, recoveryResult);
+                recovered = true;
+            }
+        }
+
+        // Pre-open BPlusTree handles for all existing indexes (rebuilding if recovered)
+        final boolean rebuildIndexes = recovered;
         loadIndexesMeta(dbDir).forEach(meta -> {
             Path idxPath = dbDir.resolve(meta.name().toLowerCase() + ".idx");
             TableFile tf = openFiles.get(meta.tableName().toLowerCase());
             if (tf != null && tf.getSchema().findColumn(meta.columnName()) != null) {
                 DataType keyType = tf.getSchema().findColumn(meta.columnName()).dataType();
+                if (rebuildIndexes) {
+                    try { Files.deleteIfExists(idxPath); } catch (IOException ignored) {}
+                }
                 DiskPageManager dpm = new DiskPageManager(idxPath);
                 BufferPool bp = new BufferPool(dpm);
-                openIndexes.put(meta.name().toLowerCase(),
-                        new dev.koradb.index.BPlusTree(meta.name(), meta.tableName(), meta.columnName(), keyType, meta.unique(), bp));
+                dev.koradb.index.BPlusTree bTree = new dev.koradb.index.BPlusTree(
+                        meta.name(), meta.tableName(), meta.columnName(), keyType, meta.unique(), bp);
+                if (rebuildIndexes) {
+                    for (TableFile.RidRow rr : tf.scanWithRids()) {
+                        Object val = rr.row().get(meta.columnName());
+                        if (val != null) {
+                            bTree.insert(new dev.koradb.index.IndexKey(val, keyType), rr.rid());
+                        }
+                    }
+                    bTree.flush();
+                }
+                openIndexes.put(meta.name().toLowerCase(), bTree);
             }
         });
         log.info("Using database '{}'", name);
@@ -535,6 +562,15 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     @Override
     public dev.koradb.storage.wal.LogManager getLogManager() {
         return logManager;
+    }
+
+    public dev.koradb.storage.recovery.RecoveryManager getRecoveryManager() {
+        if (currentDbName == null || logManager == null) {
+            return null;
+        }
+        Path dbDir = dbDir(currentDbName);
+        Path walPath = StorageConfig.walFilePath(dbDir);
+        return new dev.koradb.storage.recovery.RecoveryManager(walPath, logManager, openFiles::get, openFiles::values);
     }
 
     public Collection<TableFile> getOpenTableFiles() {

@@ -164,6 +164,45 @@ public final class SlottedPage {
         header.decrementRecordCount();
     }
 
+    /**
+     * Updates the record at an existing slot, or restores a tombstoned slot.
+     *
+     * <p>If the new record matches the old record's length, it is updated in-place.
+     * Otherwise, space is allocated at the freeEnd boundary and the slot directory
+     * entry is repointed.
+     *
+     * @param slotIndex the slot to update
+     * @param newRecord the new record bytes
+     */
+    public void updateRecord(int slotIndex, byte[] newRecord) {
+        validateSlotIndex(slotIndex);
+        int slotOffset = slotDirectoryOffset(slotIndex);
+        short oldOffset = page.readShort(slotOffset);
+        short oldLength = page.readShort(slotOffset + 2);
+
+        if (oldOffset != StorageConfig.SLOT_DELETED && newRecord.length == Short.toUnsignedInt(oldLength)) {
+            // In-place overwrite
+            page.writeBytes(Short.toUnsignedInt(oldOffset), newRecord);
+            return;
+        }
+
+        // Allocate at freeEnd
+        if (header.freeSpace() < newRecord.length) {
+            throw new StorageException("Not enough free space on page %d to update slot %d"
+                    .formatted(page.getPageId(), slotIndex));
+        }
+
+        int newFreeEnd = Short.toUnsignedInt(header.getFreeEnd()) - newRecord.length;
+        page.writeBytes(newFreeEnd, newRecord);
+        page.writeShort(slotOffset, (short) newFreeEnd);
+        page.writeShort(slotOffset + 2, (short) newRecord.length);
+        header.setFreeEnd((short) newFreeEnd);
+
+        if (oldOffset == StorageConfig.SLOT_DELETED) {
+            header.incrementRecordCount();
+        }
+    }
+
     // =========================================================================
     // Metadata
     // =========================================================================

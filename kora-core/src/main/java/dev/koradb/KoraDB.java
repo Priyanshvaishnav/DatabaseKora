@@ -154,6 +154,29 @@ public final class KoraDB implements AutoCloseable {
     }
 
     /**
+     * Returns the ARIES RecoveryManager for the active database, or null if in-memory or no DB active.
+     */
+    public dev.koradb.storage.recovery.RecoveryManager getRecoveryManager() {
+        if (catalog instanceof DiskCatalog diskCatalog) {
+            return diskCatalog.getRecoveryManager();
+        }
+        return null;
+    }
+
+    /**
+     * Manually triggers ARIES crash recovery on the active database.
+     *
+     * @return summary result of the recovery execution
+     */
+    public dev.koradb.storage.recovery.RecoveryResult recover() {
+        dev.koradb.storage.recovery.RecoveryManager rm = getRecoveryManager();
+        if (rm == null) {
+            throw new IllegalStateException("Cannot recover: no active disk database or WAL enabled");
+        }
+        return rm.recover();
+    }
+
+    /**
      * Executes a SQL statement on the default session and returns the result.
      *
      * @param sql the SQL string to execute

@@ -154,4 +154,44 @@ class LogRecordCodecTest {
                 .isInstanceOf(CorruptedLogRecordException.class)
                 .hasMessageContaining("Invalid WAL record magic");
     }
+
+    @Test
+    @DisplayName("Encodes and decodes CLR log record")
+    void testClrRecordRoundTrip() {
+        byte[] restored = new byte[]{10, 20, 30, 40};
+        ClrLogRecord record = new ClrLogRecord(500L, 450L, 77L, "orders", 3, 1, restored, 300L);
+
+        ByteBuffer buffer = ByteBuffer.allocate(256);
+        LogRecordCodec.encode(record, buffer);
+        buffer.flip();
+
+        LogRecord decoded = LogRecordCodec.decode(buffer);
+        assertThat(decoded).isInstanceOf(ClrLogRecord.class);
+        ClrLogRecord c = (ClrLogRecord) decoded;
+        assertThat(c.getLsn()).isEqualTo(500L);
+        assertThat(c.getPrevLsn()).isEqualTo(450L);
+        assertThat(c.getTxnId()).isEqualTo(77L);
+        assertThat(c.getTableName()).isEqualTo("orders");
+        assertThat(c.getPageId()).isEqualTo(3);
+        assertThat(c.getSlotIndex()).isEqualTo(1);
+        assertThat(c.getRestoredImage()).containsExactly(restored);
+        assertThat(c.getUndoNextLsn()).isEqualTo(300L);
+    }
+
+    @Test
+    @DisplayName("Encodes and decodes END log record")
+    void testEndRecordRoundTrip() {
+        EndLogRecord record = new EndLogRecord(600L, 500L, 77L);
+
+        ByteBuffer buffer = ByteBuffer.allocate(128);
+        LogRecordCodec.encode(record, buffer);
+        buffer.flip();
+
+        LogRecord decoded = LogRecordCodec.decode(buffer);
+        assertThat(decoded).isInstanceOf(EndLogRecord.class);
+        EndLogRecord e = (EndLogRecord) decoded;
+        assertThat(e.getLsn()).isEqualTo(600L);
+        assertThat(e.getPrevLsn()).isEqualTo(500L);
+        assertThat(e.getTxnId()).isEqualTo(77L);
+    }
 }

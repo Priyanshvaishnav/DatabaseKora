@@ -26,7 +26,7 @@ public final class LogRecordCodec {
     public static int calculateEncodedLength(LogRecord record) {
         int length = BASE_RECORD_OVERHEAD;
         switch (record.getType()) {
-            case BEGIN, COMMIT, ABORT -> {
+            case BEGIN, COMMIT, ABORT, END -> {
                 // No payload
             }
             case UPDATE -> {
@@ -36,6 +36,14 @@ public final class LogRecordCodec {
                 length += 4 + 4;                // pageId + slotIndex
                 length += 4 + (u.getBeforeImage() != null ? u.getBeforeImage().length : 0);
                 length += 4 + (u.getAfterImage() != null ? u.getAfterImage().length : 0);
+            }
+            case CLR -> {
+                ClrLogRecord c = (ClrLogRecord) record;
+                byte[] tableBytes = c.getTableName().getBytes(StandardCharsets.UTF_8);
+                length += 2 + tableBytes.length; // table name
+                length += 4 + 4;                // pageId + slotIndex
+                length += 4 + (c.getRestoredImage() != null ? c.getRestoredImage().length : 0);
+                length += 8;                    // undoNextLsn
             }
             case CHECKPOINT_BEGIN -> {
                 length += 8; // timestamp
@@ -76,7 +84,7 @@ public final class LogRecordCodec {
         buffer.put(record.getType().getCode());
 
         switch (record.getType()) {
-            case BEGIN, COMMIT, ABORT -> {
+            case BEGIN, COMMIT, ABORT, END -> {
                 // No payload
             }
             case UPDATE -> {
@@ -100,6 +108,22 @@ public final class LogRecordCodec {
                     buffer.putInt(u.getAfterImage().length);
                     buffer.put(u.getAfterImage());
                 }
+            }
+            case CLR -> {
+                ClrLogRecord c = (ClrLogRecord) record;
+                byte[] tableBytes = c.getTableName().getBytes(StandardCharsets.UTF_8);
+                buffer.putShort((short) tableBytes.length);
+                buffer.put(tableBytes);
+                buffer.putInt(c.getPageId());
+                buffer.putInt(c.getSlotIndex());
+
+                if (c.getRestoredImage() == null) {
+                    buffer.putInt(-1);
+                } else {
+                    buffer.putInt(c.getRestoredImage().length);
+                    buffer.put(c.getRestoredImage());
+                }
+                buffer.putLong(c.getUndoNextLsn());
             }
             case CHECKPOINT_BEGIN -> {
                 CheckpointBeginRecord c = (CheckpointBeginRecord) record;
@@ -174,6 +198,26 @@ public final class LogRecordCodec {
             case BEGIN -> new BeginLogRecord(lsn, prevLsn, txnId);
             case COMMIT -> new CommitLogRecord(lsn, prevLsn, txnId);
             case ABORT -> new AbortLogRecord(lsn, prevLsn, txnId);
+            case END -> new EndLogRecord(lsn, prevLsn, txnId);
+            case CLR -> {
+                short tableLen = buffer.getShort();
+                byte[] tableBytes = new byte[tableLen];
+                buffer.get(tableBytes);
+                String tableName = new String(tableBytes, StandardCharsets.UTF_8);
+
+                int pageId = buffer.getInt();
+                int slotIndex = buffer.getInt();
+
+                int restoredLen = buffer.getInt();
+                byte[] restoredImage = null;
+                if (restoredLen >= 0) {
+                    restoredImage = new byte[restoredLen];
+                    buffer.get(restoredImage);
+                }
+
+                long undoNextLsn = buffer.getLong();
+                yield new ClrLogRecord(lsn, prevLsn, txnId, tableName, pageId, slotIndex, restoredImage, undoNextLsn);
+            }
             case UPDATE -> {
                 short tableLen = buffer.getShort();
                 byte[] tableBytes = new byte[tableLen];

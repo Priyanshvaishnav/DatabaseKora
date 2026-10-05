@@ -32,7 +32,18 @@ public enum LogRecordType {
     /**
      * Checkpoint completion record with active transaction and dirty page tables.
      */
-    CHECKPOINT_END((byte) 6);
+    CHECKPOINT_END((byte) 6),
+
+    /**
+     * Compensation Log Record (CLR) written during undo pass to log the reversal of an update.
+     * Contains undoNextLSN to avoid undoing already-compensated actions.
+     */
+    CLR((byte) 7),
+
+    /**
+     * Indicates complete termination and cleanup of a transaction.
+     */
+    END((byte) 8);
 
     private final byte code;
 
@@ -52,6 +63,8 @@ public enum LogRecordType {
             case 4 -> ABORT;
             case 5 -> CHECKPOINT_BEGIN;
             case 6 -> CHECKPOINT_END;
+            case 7 -> CLR;
+            case 8 -> END;
             default -> throw new IllegalArgumentException("Unknown LogRecordType code: " + code);
         };
     }
