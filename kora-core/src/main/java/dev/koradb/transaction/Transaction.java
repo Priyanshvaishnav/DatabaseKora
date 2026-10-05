@@ -18,6 +18,7 @@ public class Transaction {
     private final IsolationLevel isolationLevel;
     private final long startTimeMillis;
     private final Deque<UndoAction> undoStack = new ArrayDeque<>();
+    private long prevLsn = 0L;
 
     private volatile TransactionState state;
 
@@ -50,6 +51,14 @@ public class Transaction {
 
     public boolean isActive() {
         return state == TransactionState.ACTIVE;
+    }
+
+    public synchronized long getPrevLsn() {
+        return prevLsn;
+    }
+
+    public synchronized void setPrevLsn(long prevLsn) {
+        this.prevLsn = prevLsn;
     }
 
     /**

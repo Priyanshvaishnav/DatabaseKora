@@ -28,6 +28,7 @@ public final class PageHeader {
     static final int OFFSET_FREE_END     =  8;
     static final int OFFSET_FLAGS        = 10;
     static final int OFFSET_RESERVED     = 12;
+    public static final int OFFSET_PAGE_LSN = 16;
 
     private final Page page;
 
@@ -47,6 +48,7 @@ public final class PageHeader {
      *   <li>{@code recordCount} = 0</li>
      *   <li>{@code freeStart} = PAGE_HEADER_SIZE (slots start right after header)</li>
      *   <li>{@code freeEnd} = PAGE_SIZE (records pack from the very end)</li>
+     *   <li>{@code pageLSN} = 0</li>
      * </ul>
      */
     public void initialise(int pageId) {
@@ -56,6 +58,7 @@ public final class PageHeader {
         page.writeShort(OFFSET_FREE_END,     (short) StorageConfig.PAGE_SIZE);
         page.writeShort(OFFSET_FLAGS,        (short) 0);
         page.writeInt  (OFFSET_RESERVED,     0);
+        page.writeLong (OFFSET_PAGE_LSN,     0L);
     }
 
     // =========================================================================
@@ -66,6 +69,7 @@ public final class PageHeader {
     public short getRecordCount() { return page.readShort(OFFSET_RECORD_COUNT); }
     public short getFreeStart()   { return page.readShort(OFFSET_FREE_START);   }
     public short getFreeEnd()     { return page.readShort(OFFSET_FREE_END);     }
+    public long  getPageLsn()     { return page.readLong (OFFSET_PAGE_LSN);     }
 
     /** Available free bytes — space for both a new slot entry AND the record. */
     public int freeSpace() {
@@ -84,6 +88,7 @@ public final class PageHeader {
     void setRecordCount(short count)  { page.writeShort(OFFSET_RECORD_COUNT, count);     }
     void setFreeStart  (short offset) { page.writeShort(OFFSET_FREE_START,   offset);    }
     void setFreeEnd    (short offset) { page.writeShort(OFFSET_FREE_END,     offset);    }
+    public void setPageLsn(long lsn)  { page.writeLong (OFFSET_PAGE_LSN,     lsn);       }
 
     void incrementRecordCount() { setRecordCount((short)(getRecordCount() + 1)); }
     void decrementRecordCount() { setRecordCount((short)(getRecordCount() - 1)); }

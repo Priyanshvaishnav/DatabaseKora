@@ -62,6 +62,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     private final Map<String, dev.koradb.index.BPlusTree> openIndexes = new LinkedHashMap<>();
 
     private String currentDbName = null; // lowercase key
+    private dev.koradb.storage.wal.LogManager logManager = null;
 
     /**
      * Creates a DiskCatalog rooted at the given data directory.
@@ -103,14 +104,21 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     public void dropDatabase(String name) {
         Path dbDir = dbDir(name);
         requireDbDir(name, dbDir);
-        closeOpenFiles();
+        if (name.equalsIgnoreCase(currentDbName)) {
+            closeOpenIndexes();
+            closeOpenFiles();
+            if (logManager != null) {
+                logManager.close();
+                logManager = null;
+            }
+            currentDbName = null;
+        } else {
+            closeOpenFiles();
+        }
         try {
             deleteDirectory(dbDir);
         } catch (IOException e) {
             throw new StorageException("Cannot delete database: " + name, e);
-        }
-        if (name.equalsIgnoreCase(currentDbName)) {
-            currentDbName = null;
         }
         log.info("Dropped database '{}'", name);
     }
@@ -149,12 +157,19 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         requireDbDir(name, dbDir);
         closeOpenIndexes();
         closeOpenFiles();
+        if (logManager != null) {
+            logManager.close();
+            logManager = null;
+        }
         currentDbName = name.toLowerCase();
+        Path walPath = StorageConfig.walFilePath(dbDir);
+        this.logManager = new dev.koradb.storage.wal.LogManager(walPath);
         // Pre-open TableFile handles for all existing tables
         loadTablesMeta(dbDir).forEach(table -> {
             Path filePath = StorageConfig.tableFilePath(dbDir, table.getName());
+            BufferPool bp = new BufferPool(new DiskPageManager(filePath), logManager);
             openFiles.put(table.getName().toLowerCase(),
-                          new TableFile(table.getSchema(), filePath));
+                          new TableFile(table.getSchema(), filePath, bp));
         });
         // Pre-open BPlusTree handles for all existing indexes
         loadIndexesMeta(dbDir).forEach(meta -> {
@@ -198,7 +213,8 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         }
         // Create .kdb file and open TableFile
         Path      filePath = StorageConfig.tableFilePath(dbDir, table.getName());
-        TableFile tf       = new TableFile(table.getSchema(), filePath);
+        BufferPool bp       = new BufferPool(new DiskPageManager(filePath), logManager);
+        TableFile tf       = new TableFile(table.getSchema(), filePath, bp);
         openFiles.put(table.getName().toLowerCase(), tf);
 
         // Persist the schema to catalog.meta
@@ -509,7 +525,20 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     public void close() {
         closeOpenIndexes();
         closeOpenFiles();
+        if (logManager != null) {
+            logManager.close();
+            logManager = null;
+        }
         log.debug("DiskCatalog closed");
+    }
+
+    @Override
+    public dev.koradb.storage.wal.LogManager getLogManager() {
+        return logManager;
+    }
+
+    public Collection<TableFile> getOpenTableFiles() {
+        return Collections.unmodifiableCollection(openFiles.values());
     }
 
     private void closeOpenIndexes() {

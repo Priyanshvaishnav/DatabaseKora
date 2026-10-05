@@ -181,7 +181,7 @@ public final class StatementExecutor {
         Row newRow = new Row(rowValues);
         if (table instanceof DiskTable diskTable) {
             TableFile tf = diskTable.getTableFile();
-            RecordId rid = tf.insertRow(newRow);
+            RecordId rid = tf.insertRow(newRow, txn);
             for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
                 Object val = newRow.get(idx.getColumnName());
                 if (val != null) {
@@ -289,7 +289,7 @@ public final class StatementExecutor {
                         newVals.put(a.columnName(), typed);
                     }
                     Row newRow = new Row(newVals);
-                    RecordId newRid = tf.updateRow(rr.rid(), newRow);
+                    RecordId newRid = tf.updateRow(rr.rid(), newRow, txn);
                     for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
                         Object oldVal = rr.row().get(idx.getColumnName());
                         Object newVal = newVals.get(idx.getColumnName());
@@ -355,7 +355,7 @@ public final class StatementExecutor {
             TableFile tf = diskTable.getTableFile();
             for (TableFile.RidRow rr : tf.scanWithRids()) {
                 if (matchesWhere(rr.row(), stmt.where(), evaluator)) {
-                    tf.deleteRow(rr.rid());
+                    tf.deleteRow(rr.rid(), txn);
                     for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
                         Object val = rr.row().get(idx.getColumnName());
                         if (val != null) {

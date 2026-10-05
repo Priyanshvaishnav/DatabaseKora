@@ -25,18 +25,24 @@ public class TransactionManager {
     private final ConcurrentMap<TransactionId, Transaction> activeTransactions = new ConcurrentHashMap<>();
     private final LockManager lockManager;
     private final Catalog catalog;
+    private final dev.koradb.storage.wal.LogManager logManager;
 
-    public TransactionManager(LockManager lockManager, Catalog catalog) {
+    public TransactionManager(LockManager lockManager, Catalog catalog, dev.koradb.storage.wal.LogManager logManager) {
         this.lockManager = Objects.requireNonNull(lockManager, "lockManager must not be null");
         this.catalog = catalog;
+        this.logManager = logManager;
+    }
+
+    public TransactionManager(LockManager lockManager, Catalog catalog) {
+        this(lockManager, catalog, null);
     }
 
     public TransactionManager(LockManager lockManager) {
-        this(lockManager, null);
+        this(lockManager, null, null);
     }
 
     public TransactionManager() {
-        this(new LockManager(), null);
+        this(new LockManager(), null, null);
     }
 
     /**
@@ -46,12 +52,24 @@ public class TransactionManager {
         return beginTransaction(IsolationLevel.SERIALIZABLE);
     }
 
+    private dev.koradb.storage.wal.LogManager activeLogManager() {
+        if (catalog != null && catalog.getLogManager() != null) {
+            return catalog.getLogManager();
+        }
+        return this.logManager;
+    }
+
     /**
      * Begins a new transaction with the specified isolation level.
      */
     public Transaction beginTransaction(IsolationLevel isolationLevel) {
         TransactionId id = new TransactionId(nextTxnId.getAndIncrement());
         Transaction txn = new Transaction(id, isolationLevel);
+        dev.koradb.storage.wal.LogManager lm = activeLogManager();
+        if (lm != null) {
+            long lsn = lm.appendBegin(id.value(), 0L);
+            txn.setPrevLsn(lsn);
+        }
         activeTransactions.put(id, txn);
         log.debug("Started transaction {} with isolation {}", id, isolationLevel);
         return txn;
@@ -59,6 +77,7 @@ public class TransactionManager {
 
     /**
      * Commits the active transaction and releases all held locks.
+     * Enforces the Force-Log-at-Commit rule by flushing the WAL up to the commit record.
      */
     public void commitTransaction(Transaction txn) {
         Objects.requireNonNull(txn, "txn must not be null");
@@ -67,6 +86,13 @@ public class TransactionManager {
         }
 
         log.debug("Committing transaction {}", txn.getId());
+        dev.koradb.storage.wal.LogManager lm = activeLogManager();
+        if (lm != null) {
+            long commitLsn = lm.appendCommit(txn.getId().value(), txn.getPrevLsn());
+            txn.setPrevLsn(commitLsn);
+            lm.flush(commitLsn);
+        }
+
         txn.markCommitted();
 
         // Release all SS2PL locks held by this transaction
@@ -108,11 +134,21 @@ public class TransactionManager {
                     }
                 }
             }
+            dev.koradb.storage.wal.LogManager lm = activeLogManager();
+            if (lm != null) {
+                long abortLsn = lm.appendAbort(txn.getId().value(), txn.getPrevLsn());
+                txn.setPrevLsn(abortLsn);
+                lm.flush(abortLsn);
+            }
         } finally {
             lockManager.releaseAll(txn.getId());
             activeTransactions.remove(txn.getId());
         }
         log.info("Transaction {} aborted and rolled back", txn.getId());
+    }
+
+    public dev.koradb.storage.wal.LogManager getLogManager() {
+        return activeLogManager();
     }
 
     public LockManager getLockManager() {

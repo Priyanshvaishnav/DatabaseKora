@@ -64,6 +64,16 @@ public final class Page {
 
     public int getPageId() { return pageId; }
 
+    /** Returns the Page Log Sequence Number (pageLSN) stored in the page header. */
+    public long getPageLsn() {
+        return readLong(PageHeader.OFFSET_PAGE_LSN);
+    }
+
+    /** Updates the Page Log Sequence Number (pageLSN) in the page header. */
+    public void setPageLsn(long lsn) {
+        writeLong(PageHeader.OFFSET_PAGE_LSN, lsn);
+    }
+
     /** Returns a direct reference to the internal byte array (no copy). */
     public byte[] getData() { return data; }
 
