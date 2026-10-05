@@ -18,6 +18,10 @@ public record TransactionId(long id) implements Comparable<TransactionId> {
         return Long.compare(this.id, o.id);
     }
 
+    public long value() {
+        return id;
+    }
+
     @Override
     public String toString() {
         return "Txn#" + id;

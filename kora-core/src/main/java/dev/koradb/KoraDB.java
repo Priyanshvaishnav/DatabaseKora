@@ -126,6 +126,34 @@ public final class KoraDB implements AutoCloseable {
     }
 
     /**
+     * Creates a CheckpointManager bound to the active database and transaction manager.
+     * Returns null if the current catalog is in-memory or no database is active.
+     */
+    public dev.koradb.storage.wal.CheckpointManager createCheckpointManager() {
+        if (catalog instanceof DiskCatalog diskCatalog && diskCatalog.getLogManager() != null) {
+            return new dev.koradb.storage.wal.CheckpointManager(
+                    diskCatalog.getLogManager(),
+                    transactionManager,
+                    diskCatalog::getOpenTableFiles
+            );
+        }
+        return null;
+    }
+
+    /**
+     * Executes a checkpoint on the active database and returns the CheckpointEnd LSN.
+     *
+     * @return LSN of CheckpointEnd record
+     */
+    public long checkpoint() {
+        dev.koradb.storage.wal.CheckpointManager cp = createCheckpointManager();
+        if (cp == null) {
+            throw new IllegalStateException("Cannot checkpoint: no active disk database or WAL enabled");
+        }
+        return cp.checkpoint();
+    }
+
+    /**
      * Executes a SQL statement on the default session and returns the result.
      *
      * @param sql the SQL string to execute

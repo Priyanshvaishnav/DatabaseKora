@@ -62,6 +62,7 @@ public final class BufferPool implements AutoCloseable {
     private final DiskPageManager             diskManager;
     private final int                         capacity;
     private final BufferPoolStats             stats;
+    private final dev.koradb.storage.wal.LogManager logManager;
 
     /**
      * LRU map: pageId → frame.
@@ -71,30 +72,52 @@ public final class BufferPool implements AutoCloseable {
     private final LinkedHashMap<Integer, BufferFrame> frames;
 
     /**
-     * Creates a buffer pool of the default size (256 frames = 1 MB).
+     * Creates a buffer pool of the default size (256 frames = 1 MB) without WAL.
      *
      * @param diskManager the underlying disk page I/O manager
      */
     public BufferPool(DiskPageManager diskManager) {
-        this(diskManager, DEFAULT_POOL_SIZE);
+        this(diskManager, DEFAULT_POOL_SIZE, null);
     }
 
     /**
-     * Creates a buffer pool with the given capacity.
+     * Creates a buffer pool with the given capacity without WAL.
      *
      * @param diskManager the underlying disk page I/O manager
      * @param capacity    number of frames (pages) to hold in memory
      */
     public BufferPool(DiskPageManager diskManager, int capacity) {
+        this(diskManager, capacity, null);
+    }
+
+    /**
+     * Creates a buffer pool of default size with WAL support.
+     *
+     * @param diskManager the underlying disk page I/O manager
+     * @param logManager  the WAL log manager (nullable)
+     */
+    public BufferPool(DiskPageManager diskManager, dev.koradb.storage.wal.LogManager logManager) {
+        this(diskManager, DEFAULT_POOL_SIZE, logManager);
+    }
+
+    /**
+     * Creates a buffer pool with the given capacity and WAL support.
+     *
+     * @param diskManager the underlying disk page I/O manager
+     * @param capacity    number of frames (pages) to hold in memory
+     * @param logManager  the WAL log manager (nullable)
+     */
+    public BufferPool(DiskPageManager diskManager, int capacity, dev.koradb.storage.wal.LogManager logManager) {
         if (capacity <= 0) throw new IllegalArgumentException(
                 "Buffer pool capacity must be > 0, got: " + capacity);
         this.diskManager = diskManager;
         this.capacity    = capacity;
+        this.logManager  = logManager;
         this.stats       = new BufferPoolStats();
         // accessOrder=true → get() moves entry to tail (MRU position)
         this.frames      = new LinkedHashMap<>(capacity, 0.75f, true);
-        log.debug("BufferPool initialised: capacity={} frames ({} KB)",
-                capacity, capacity * 4);
+        log.debug("BufferPool initialised: capacity={} frames ({} KB) wal={}",
+                capacity, capacity * 4, logManager != null);
     }
 
     // =========================================================================
@@ -173,20 +196,31 @@ public final class BufferPool implements AutoCloseable {
         log.debug("Marked dirty: page={}", frame.getPage().getPageId());
     }
 
+    /**
+     * Marks a frame as dirty with an explicit LSN.
+     *
+     * @param frame the frame whose page was modified
+     * @param lsn   the LSN of the log record that dirtied the page
+     */
+    public void markDirty(BufferFrame frame, long lsn) {
+        frame.markDirty(lsn);
+        log.debug("Marked dirty: page={} lsn={}", frame.getPage().getPageId(), lsn);
+    }
+
     // =========================================================================
     // Flush
     // =========================================================================
 
     /**
      * Writes all dirty frames to disk without evicting them.
-     * Used at shutdown and (in M8) before WAL checkpoints.
+     * Enforces WAL invariant before writing.
+     * Used at shutdown and before WAL checkpoints.
      */
     public void flushAll() {
         int flushed = 0;
         for (BufferFrame frame : frames.values()) {
             if (frame.isDirty()) {
-                diskManager.write(frame.getPage());
-                frame.clearDirty();
+                flushFrameToDisk(frame);
                 flushed++;
             }
         }
@@ -201,9 +235,28 @@ public final class BufferPool implements AutoCloseable {
     public void flushPage(int pageId) {
         BufferFrame frame = frames.get(pageId);
         if (frame != null && frame.isDirty()) {
-            diskManager.write(frame.getPage());
-            frame.clearDirty();
+            flushFrameToDisk(frame);
         }
+    }
+
+    /**
+     * Flushes a single frame to disk, strictly enforcing the Write-Ahead Logging (WAL) invariant:
+     * any log records up to {@code pageLSN} must be flushed to disk before the dirty page
+     * is written to disk.
+     */
+    private void flushFrameToDisk(BufferFrame frame) {
+        if (!frame.isDirty()) {
+            return;
+        }
+        Page page = frame.getPage();
+        long pageLsn = page.getPageLsn();
+        if (logManager != null && pageLsn > 0 && pageLsn >= logManager.getFlushedLsn()) {
+            log.trace("WAL invariant flush: pageId={} pageLsn={} flushedLsn={}",
+                    page.getPageId(), pageLsn, logManager.getFlushedLsn());
+            logManager.flush(pageLsn);
+        }
+        diskManager.write(page);
+        frame.clearDirty();
     }
 
     // =========================================================================
@@ -239,6 +292,24 @@ public final class BufferPool implements AutoCloseable {
     /** Returns the underlying disk page manager. */
     public DiskPageManager getDiskManager() { return diskManager; }
 
+    /** Returns the WAL log manager, if configured. */
+    public dev.koradb.storage.wal.LogManager getLogManager() { return logManager; }
+
+    /**
+     * Returns a snapshot of dirty pages and their recovery LSNs (pageLSN or recLSN).
+     * Used during checkpointing.
+     */
+    public Map<Integer, Long> getDirtyPageTable() {
+        Map<Integer, Long> dpt = new LinkedHashMap<>();
+        for (BufferFrame frame : frames.values()) {
+            if (frame.isDirty()) {
+                long lsn = frame.getRecLsn() > 0 ? frame.getRecLsn() : frame.getPage().getPageLsn();
+                dpt.put(frame.getPage().getPageId(), lsn);
+            }
+        }
+        return dpt;
+    }
+
     // =========================================================================
     // Lifecycle
     // =========================================================================
@@ -260,7 +331,7 @@ public final class BufferPool implements AutoCloseable {
 
     /**
      * If the pool is at capacity, evicts the LRU unpinned frame.
-     * Writes the frame to disk first if it is dirty.
+     * Writes the frame to disk first if it is dirty (enforcing WAL invariant).
      *
      * @throws StorageException if every frame is pinned (pool exhausted)
      */
@@ -283,7 +354,7 @@ public final class BufferPool implements AutoCloseable {
 
         BufferFrame evicted = victim.getValue();
         if (evicted.isDirty()) {
-            diskManager.write(evicted.getPage());
+            flushFrameToDisk(evicted);
             stats.recordDirtyEviction();
             log.debug("Evicted dirty page={}", evicted.getPage().getPageId());
         } else {

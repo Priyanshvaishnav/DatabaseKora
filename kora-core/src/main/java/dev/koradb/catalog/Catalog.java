@@ -131,4 +131,11 @@ public interface Catalog {
      * Returns table statistics (row count, page count, NDV per column) for query planning.
      */
     TableStatistics getTableStatistics(String tableName);
+
+    /**
+     * Returns the Write-Ahead Log (WAL) manager for the active database, or null if none.
+     */
+    default dev.koradb.storage.wal.LogManager getLogManager() {
+        return null;
+    }
 }

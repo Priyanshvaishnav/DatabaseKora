@@ -266,4 +266,82 @@ class BufferPoolTest {
             pool.close();
         }
     }
+
+    // =========================================================================
+    // Write-Ahead Logging (WAL) Invariant & Dirty Page Table
+    // =========================================================================
+
+    @Nested
+    @DisplayName("WAL Invariant & Recovery Metadata")
+    class WalInvariant {
+
+        @Test
+        @DisplayName("eviction flushes WAL to disk before dirty page is written")
+        void evictionEnforcesWalFlush(@TempDir Path dir) {
+            Path dbPath = dir.resolve("wal_test.kdb");
+            Path walPath = dir.resolve("wal_test.wal");
+
+            try (DiskPageManager mgr = new DiskPageManager(dbPath);
+                 dev.koradb.storage.wal.LogManager logManager = new dev.koradb.storage.wal.LogManager(walPath);
+                 BufferPool pool = new BufferPool(mgr, 2, logManager)) {
+
+                mgr.allocatePage();
+                mgr.allocatePage();
+                mgr.allocatePage();
+
+                // Append a log record to WAL (unflushed)
+                dev.koradb.storage.wal.BeginLogRecord record = new dev.koradb.storage.wal.BeginLogRecord(0, 0, 100);
+                long lsn = logManager.append(record);
+                assertThat(logManager.getFlushedLsn()).isLessThanOrEqualTo(lsn);
+
+                // Pin page 0, mutate, set pageLSN = lsn, mark dirty, unpin
+                BufferFrame f0 = pool.pin(0);
+                f0.getPage().setPageLsn(lsn);
+                f0.getPage().writeInt(100, 777);
+                pool.markDirty(f0, lsn);
+                pool.unpin(f0);
+
+                // Verify dirty page table has page 0 with recLSN = lsn
+                assertThat(pool.getDirtyPageTable()).containsEntry(0, lsn);
+
+                // Pin page 1
+                BufferFrame f1 = pool.pin(1);
+                pool.unpin(f1);
+
+                // Pin page 2: forces eviction of page 0
+                BufferFrame f2 = pool.pin(2);
+                pool.unpin(f2);
+
+                // Verify that eviction forced WAL to flush past lsn
+                assertThat(logManager.getFlushedLsn()).isGreaterThan(lsn);
+            }
+        }
+
+        @Test
+        @DisplayName("flushAll flushes WAL up to pageLSN before writing pages")
+        void flushAllEnforcesWalFlush(@TempDir Path dir) {
+            Path dbPath = dir.resolve("wal_flushall.kdb");
+            Path walPath = dir.resolve("wal_flushall.wal");
+
+            try (DiskPageManager mgr = new DiskPageManager(dbPath);
+                 dev.koradb.storage.wal.LogManager logManager = new dev.koradb.storage.wal.LogManager(walPath);
+                 BufferPool pool = new BufferPool(mgr, 4, logManager)) {
+
+                mgr.allocatePage();
+
+                long lsn = logManager.append(new dev.koradb.storage.wal.BeginLogRecord(0, 0, 200));
+                assertThat(logManager.getFlushedLsn()).isLessThanOrEqualTo(lsn);
+
+                BufferFrame f = pool.pin(0);
+                f.getPage().setPageLsn(lsn);
+                pool.markDirty(f);
+                pool.unpin(f);
+
+                pool.flushAll();
+
+                assertThat(logManager.getFlushedLsn()).isGreaterThan(lsn);
+            }
+        }
+    }
 }
+

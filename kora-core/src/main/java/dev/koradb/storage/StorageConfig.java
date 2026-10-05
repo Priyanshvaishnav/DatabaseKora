@@ -30,10 +30,11 @@ public final class StorageConfig {
      * freeEnd     (2 bytes) — short (byte offset where free space ends)
      * flags       (2 bytes) — short (reserved for dirty/pinned bits in M3)
      * reserved    (4 bytes) — int  (reserved for next-page pointer in M3)
-     * Total: 16 bytes
+     * pageLSN     (8 bytes) — long (Write-Ahead Log Sequence Number in M8)
+     * Total: 24 bytes
      * </pre>
      */
-    public static final int PAGE_HEADER_SIZE = 16;
+    public static final int PAGE_HEADER_SIZE = 24;
 
     /**
      * Size of one slot entry in the slot directory, in bytes.
@@ -66,6 +67,9 @@ public final class StorageConfig {
     /** File name for the catalog metadata file within each database directory. */
     public static final String CATALOG_META_FILE = "catalog.meta";
 
+    /** File name for the Write-Ahead Log file within each database directory. */
+    public static final String WAL_FILE_NAME = "kora.wal";
+
     private StorageConfig() {} // utility class — no instances
 
     /**
@@ -87,5 +91,15 @@ public final class StorageConfig {
      */
     public static Path tableFilePath(Path dbDir, String tableName) {
         return dbDir.resolve(tableName.toLowerCase() + TABLE_FILE_EXTENSION);
+    }
+
+    /**
+     * Returns the path to the Write-Ahead Log (WAL) file for a database directory.
+     *
+     * @param dbDir the database directory
+     * @return path like {@code data/mydb/kora.wal}
+     */
+    public static Path walFilePath(Path dbDir) {
+        return dbDir.resolve(WAL_FILE_NAME);
     }
 }

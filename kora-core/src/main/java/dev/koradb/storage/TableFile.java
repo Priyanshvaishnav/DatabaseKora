@@ -43,6 +43,7 @@ public final class TableFile implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(TableFile.class);
 
+    private final String           tableName;
     private final Schema           schema;
     private final BufferPool       bufferPool;
     private final DiskPageManager  diskManager;
@@ -60,6 +61,8 @@ public final class TableFile implements AutoCloseable {
         this.diskManager = bufferPool.getDiskManager();
         this.bufferPool  = bufferPool;
         this.serializer  = new RecordSerializer(schema);
+        String fn        = filePath.getFileName().toString();
+        this.tableName   = fn.endsWith(".kdb") ? fn.substring(0, fn.length() - 4) : fn;
         log.debug("TableFile opened with buffer pool: {}", filePath.getFileName());
     }
 
@@ -78,6 +81,9 @@ public final class TableFile implements AutoCloseable {
     /** Returns the schema associated with this table file. */
     public Schema getSchema() { return schema; }
 
+    /** Returns the table name associated with this file. */
+    public String getTableName() { return tableName; }
+
     /** Returns the buffer pool used by this table. */
     public BufferPool getBufferPool() { return bufferPool; }
 
@@ -93,6 +99,18 @@ public final class TableFile implements AutoCloseable {
      * @return the {@link RecordId} permanently identifying the inserted row
      */
     public RecordId insertRow(Row row) {
+        return insertRow(row, null);
+    }
+
+    /**
+     * Serializes a row and inserts it, recording WAL update log records when
+     * WAL is active.
+     *
+     * @param row the row to insert
+     * @param txn the active transaction (nullable)
+     * @return the {@link RecordId} permanently identifying the inserted row
+     */
+    public RecordId insertRow(Row row, dev.koradb.transaction.Transaction txn) {
         byte[] record = serializer.serialize(row);
 
         int totalPages = diskManager.pageCount();
@@ -102,7 +120,7 @@ public final class TableFile implements AutoCloseable {
                 SlottedPage sp = new SlottedPage(frame.getPage());
                 if (sp.freeSpace() >= StorageConfig.SLOT_SIZE + record.length) {
                     int slot = sp.insertRecord(record);
-                    bufferPool.markDirty(frame);
+                    applyWalAndMarkDirty(frame, slot, new byte[0], record, txn);
                     RecordId rid = new RecordId(pid, slot);
                     log.debug("Inserted row at {}", rid);
                     return rid;
@@ -117,7 +135,7 @@ public final class TableFile implements AutoCloseable {
         try {
             SlottedPage sp   = new SlottedPage(frame.getPage());
             int         slot = sp.insertRecord(record);
-            bufferPool.markDirty(frame);
+            applyWalAndMarkDirty(frame, slot, new byte[0], record, txn);
             RecordId rid = new RecordId(frame.getPage().getPageId(), slot);
             log.debug("Inserted row at {} (new page)", rid);
             return rid;
@@ -214,11 +232,19 @@ public final class TableFile implements AutoCloseable {
      * The frame is marked dirty so the pool writes the page on eviction.
      */
     public void deleteRow(RecordId rid) {
+        deleteRow(rid, null);
+    }
+
+    /**
+     * Marks the slot at {@code rid} as a tombstone and records a WAL update record.
+     */
+    public void deleteRow(RecordId rid, dev.koradb.transaction.Transaction txn) {
         BufferFrame frame = bufferPool.pin(rid.pageId());
         try {
             SlottedPage sp = new SlottedPage(frame.getPage());
+            byte[] oldBytes = sp.isAlive(rid.slotIndex()) ? sp.getRecord(rid.slotIndex()) : new byte[0];
             sp.deleteRecord(rid.slotIndex());
-            bufferPool.markDirty(frame);
+            applyWalAndMarkDirty(frame, rid.slotIndex(), oldBytes, new byte[0], txn);
         } finally {
             bufferPool.unpin(frame);
         }
@@ -234,8 +260,33 @@ public final class TableFile implements AutoCloseable {
      * The new version may land on a different page.
      */
     public RecordId updateRow(RecordId rid, Row newRow) {
-        deleteRow(rid);
-        return insertRow(newRow);
+        return updateRow(rid, newRow, null);
+    }
+
+    /**
+     * Updates a row via delete + re-insert within a transaction.
+     */
+    public RecordId updateRow(RecordId rid, Row newRow, dev.koradb.transaction.Transaction txn) {
+        deleteRow(rid, txn);
+        return insertRow(newRow, txn);
+    }
+
+    private void applyWalAndMarkDirty(BufferFrame frame, int slot, byte[] beforeImage, byte[] afterImage,
+                                      dev.koradb.transaction.Transaction txn) {
+        dev.koradb.storage.wal.LogManager logManager = bufferPool.getLogManager();
+        if (logManager != null) {
+            long txnId = (txn != null) ? txn.getId().value() : 0L;
+            long prevLsn = (txn != null) ? txn.getPrevLsn() : 0L;
+            long lsn = logManager.appendUpdate(txnId, prevLsn, tableName, frame.getPage().getPageId(),
+                    slot, beforeImage, afterImage);
+            frame.getPage().setPageLsn(lsn);
+            bufferPool.markDirty(frame, lsn);
+            if (txn != null) {
+                txn.setPrevLsn(lsn);
+            }
+        } else {
+            bufferPool.markDirty(frame);
+        }
     }
 
     // =========================================================================

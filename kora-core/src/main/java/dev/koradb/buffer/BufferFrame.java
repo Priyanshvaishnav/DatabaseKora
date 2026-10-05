@@ -30,12 +30,14 @@ public final class BufferFrame {
     private final Page page;
     private int     pinCount;
     private boolean dirty;
+    private long    recLsn;
     private long    lastAccessTime; // System.nanoTime() — used for LRU ordering
 
     BufferFrame(Page page) {
         this.page           = page;
         this.pinCount       = 0;
         this.dirty          = false;
+        this.recLsn         = 0L;
         this.lastAccessTime = System.nanoTime();
     }
 
@@ -46,6 +48,7 @@ public final class BufferFrame {
     public Page getPage()          { return page;       }
     public int  getPinCount()      { return pinCount;   }
     public boolean isDirty()       { return dirty;      }
+    public long getRecLsn()        { return recLsn;     }
     public long getLastAccessTime(){ return lastAccessTime; }
 
     /** Returns true if this frame can be evicted (no active users). */
@@ -54,8 +57,22 @@ public final class BufferFrame {
     // Package-private mutations — called only by BufferPool
     void pin()               { pinCount++;                           }
     void unpin()             { if (pinCount > 0) pinCount--;         }
-    void markDirty()         { dirty = true;                         }
-    void clearDirty()        { dirty = false;                        }
+    void markDirty()         {
+        if (!dirty) {
+            dirty = true;
+            recLsn = page.getPageLsn();
+        }
+    }
+    void markDirty(long lsn) {
+        if (!dirty) {
+            dirty = true;
+            recLsn = lsn;
+        }
+    }
+    void clearDirty()        {
+        dirty = false;
+        recLsn = 0L;
+    }
     void touch()             { lastAccessTime = System.nanoTime();   }
 
     @Override

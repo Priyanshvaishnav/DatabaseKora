@@ -4,7 +4,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-blue)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Build-Maven-orange)](https://maven.apache.org/)
-[![Status](https://img.shields.io/badge/Milestone-1%20SQL%20Engine-green)](#milestones)
+[![Status](https://img.shields.io/badge/Milestone-8%20Write--Ahead%20Logging-green)](#milestones)
 
 ---
 
@@ -61,8 +61,8 @@ Storage Engine (Pages on disk)                        ← Phase 2
 | 5 | Query Execution (operator tree) | ✅ Complete |
 | 6 | Query Planner and Optimizer | ✅ Complete |
 | 7 | Transactions | ✅ Complete |
-| 8 | Write-Ahead Logging | 🔜 Next |
-| 9 | Crash Recovery | ⬜ |
+| 8 | Write-Ahead Logging | ✅ Complete |
+| 9 | Crash Recovery | 🔜 Next |
 | 10 | MVCC | ⬜ |
 | 11 | Database Server + CLI | ⬜ |
 | 12 | Replication | ⬜ |
