@@ -4,7 +4,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-blue)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Build-Maven-orange)](https://maven.apache.org/)
-[![Status](https://img.shields.io/badge/Milestone-8%20Write--Ahead%20Logging-green)](#milestones)
+[![Status](https://img.shields.io/badge/Milestone-9%20Crash%20Recovery-green)](#milestones)
 
 ---
 
@@ -20,7 +20,7 @@ The ultimate goal is a system that covers:
 - Buffer pool management
 - B+ Tree indexes
 - Transactions and Write-Ahead Logging
-- Crash recovery
+- Crash recovery (ARIES)
 - MVCC (Multi-Version Concurrency Control)
 - Client-server networking
 - Primary/replica replication
@@ -62,8 +62,8 @@ Storage Engine (Pages on disk)                        ← Phase 2
 | 6 | Query Planner and Optimizer | ✅ Complete |
 | 7 | Transactions | ✅ Complete |
 | 8 | Write-Ahead Logging | ✅ Complete |
-| 9 | Crash Recovery | 🔜 Next |
-| 10 | MVCC | ⬜ |
+| 9 | Crash Recovery (ARIES) | ✅ Complete |
+| 10 | MVCC | 🔜 Next |
 | 11 | Database Server + CLI | ⬜ |
 | 12 | Replication | ⬜ |
 | 13 | Observability | ⬜ |
@@ -125,6 +125,10 @@ db.execute("BEGIN");
 db.execute("UPDATE accounts SET balance = 6000.0 WHERE id = 1");
 db.execute("INSERT INTO accounts VALUES (3, 'Charlie', 4000.0, true)");
 db.execute("ROLLBACK"); // Cleanly restores accounts to pre-transaction state
+
+// Periodic Checkpointing & ARIES Crash Recovery
+long checkpointLsn = db.checkpoint(); // Flushes dirty frames & takes ATT/DPT snapshot
+dev.koradb.storage.recovery.RecoveryResult result = db.recover(); // 3-phase ARIES recovery
 ```
 
 ---

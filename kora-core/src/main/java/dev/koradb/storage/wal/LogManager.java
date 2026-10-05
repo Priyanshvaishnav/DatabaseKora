@@ -148,6 +148,15 @@ public final class LogManager implements AutoCloseable {
         return append(new CheckpointEndRecord(activeTxns, dirtyPages));
     }
 
+    public long appendClr(long txnId, long prevLsn, String tableName, int pageId, int slotIndex,
+                          byte[] restoredImage, long undoNextLsn) {
+        return append(new ClrLogRecord(prevLsn, txnId, tableName, pageId, slotIndex, restoredImage, undoNextLsn));
+    }
+
+    public long appendEnd(long txnId, long prevLsn) {
+        return append(new EndLogRecord(prevLsn, txnId));
+    }
+
     /**
      * Synchronously flushes log records up to {@code targetLsn} to disk using Group Commit.
      *
