@@ -4,7 +4,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-blue)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Build-Maven-orange)](https://maven.apache.org/)
-[![Status](https://img.shields.io/badge/Milestone-12%20Replication-green)](#milestones)
+[![Status](https://img.shields.io/badge/Milestone-13%20Observability-green)](#milestones)
 
 ---
 
@@ -66,8 +66,8 @@ Storage Engine (Pages on disk)                        ← Phase 2
 | 10 | MVCC | ✅ Complete |
 | 11 | Database Server + CLI | ✅ Complete |
 | 12 | Replication | ✅ Complete |
-| 13 | Observability | 🔜 Next |
-| 14 | Docker + Kubernetes | ⬜ |
+| 13 | Observability | ✅ Complete |
+| 14 | Docker + Kubernetes | 🔜 Next |
 | 15 | Benchmarks | ⬜ |
 | 16 | AI Layer | ⬜ |
 
@@ -209,6 +209,28 @@ replica.promote();
 replica.execute("INSERT INTO users VALUES (2, 'Bob')"); // Now accepts writes!
 ```
 
+### Observability, Prometheus Exporter & Tracing
+
+```java
+// Bind database to ObservabilityEngine
+ObservabilityEngine engine = ObservabilityEngine.getInstance();
+DiskCatalog catalog = (DiskCatalog) db.getCatalog();
+
+engine.bindLogManager(catalog::getLogManager);
+engine.bindTransactionManager(db.getTransactionManager());
+engine.bindBufferPools(() -> catalog.getOpenTableFiles().stream()
+        .map(tf -> tf.getBufferPool().getStats())
+        .toList());
+
+// Starts Prometheus HTTP metrics exporter on port 9100 (/metrics, /health)
+engine.startHttpExporter(9100);
+
+// Interactive diagnostic commands
+db.execute("SHOW BUFFER POOL STATUS;");
+db.execute("SHOW TRANSACTIONS;");
+db.execute("SHOW METRICS;");
+```
+
 ---
 
 ## Module Structure
@@ -248,7 +270,7 @@ kora-db/
 | [MVCC](docs/mvcc.md) | Multi-version concurrency ← Phase 10 |
 | [Server & CLI](docs/server-and-cli.md) | Network TCP server, binary wire protocol & interactive CLI ← Phase 11 |
 | [Replication](docs/replication.md) | WAL-based physical replication (Async, Sync, Failover) ← Phase 12 |
-| [Observability](docs/observability.md) | Metrics and tracing ← Phase 13 |
+| [Observability](docs/observability.md) | Prometheus metrics, HTTP exporter, OTel tracing & Grafana ← Phase 13 |
 | [Benchmarks](docs/benchmarks.md) | Performance results ← Phase 15 |
 
 ---

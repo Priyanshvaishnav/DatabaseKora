@@ -1,0 +1,47 @@
+groups:
+  - name: koradb-alerts
+    rules:
+      - alert: KoraDbDown
+        expr: up{job="koradb"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "KoraDB instance is unreachable"
+          description: "KoraDB exporter at {{ $labels.instance }} has been unreachable for more than 1 minute."
+
+      - alert: KoraDbLowBufferPoolHitRatio
+        expr: koradb_buffer_pool_hit_ratio < 0.80
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low Buffer Pool Hit Ratio on {{ $labels.instance }}"
+          description: "Buffer pool hit ratio has fallen below 80% (current: {{ $value | humanizePercentage }}). Working set may exceed configured buffer pool size."
+
+      - alert: KoraDbHighQueryLatency
+        expr: histogram_quantile(0.95, sum(rate(koradb_query_duration_seconds_bucket[5m])) by (le)) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Query Latency on {{ $labels.instance }}"
+          description: "95th percentile query latency is above 500ms (current: {{ $value }}s)."
+
+      - alert: KoraDbHighTransactionAbortRate
+        expr: rate(koradb_transactions_aborted_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Transaction Abort Rate on {{ $labels.instance }}"
+          description: "Transactions are aborting at a rate of {{ $value }} aborts/sec. Check for lock conflicts or deadlocks."
+
+      - alert: KoraDbHighReplicationLag
+        expr: koradb_replication_lag_milliseconds > 5000
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High Replication Lag on {{ $labels.instance }}"
+          description: "Replica is {{ $value }}ms behind Primary WAL head. Network saturation or slow disk I/O suspected."

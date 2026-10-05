@@ -17,7 +17,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import dev.koradb.catalog.Row;
 
 /**
  * The public entry point to KoraDB.
@@ -208,6 +211,12 @@ public final class KoraDB implements AutoCloseable {
         return execute(defaultSession, sql);
     }
 
+    private static volatile java.util.function.Supplier<QueryResult> metricsStatusSupplier;
+
+    public static void setMetricsStatusSupplier(java.util.function.Supplier<QueryResult> supplier) {
+        metricsStatusSupplier = supplier;
+    }
+
     /**
      * Executes a SQL statement in the context of the provided session.
      *
@@ -218,9 +227,76 @@ public final class KoraDB implements AutoCloseable {
     public QueryResult execute(dev.koradb.session.Session session, String sql) {
         log.debug("execute [session={}]: {}", session.getSessionId(), sql);
 
+        String trimmed = sql.trim();
+        while (trimmed.endsWith(";")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1).trim();
+        }
+
+        if (trimmed.equalsIgnoreCase("SHOW BUFFER POOL STATUS")) {
+            return getBufferPoolStatus();
+        }
+        if (trimmed.equalsIgnoreCase("SHOW TRANSACTIONS")) {
+            return getActiveTransactionsStatus();
+        }
+        if (trimmed.equalsIgnoreCase("SHOW METRICS")) {
+            if (metricsStatusSupplier != null) {
+                return metricsStatusSupplier.get();
+            }
+            return QueryResult.select(List.of(), List.of("name", "type", "value"));
+        }
+
         List<Token> tokens    = new Lexer(sql).tokenize();
         Statement   statement = new Parser(tokens).parse();
         return execute(session, statement);
+    }
+
+    private QueryResult getBufferPoolStatus() {
+        long hits = 0L;
+        long misses = 0L;
+        long evictions = 0L;
+        long dirtyEvictions = 0L;
+
+        if (catalog instanceof dev.koradb.catalog.DiskCatalog diskCatalog) {
+            for (dev.koradb.storage.TableFile tf : diskCatalog.getOpenTableFiles()) {
+                if (tf != null && tf.getBufferPool() != null) {
+                    dev.koradb.buffer.BufferPoolStats stats = tf.getBufferPool().getStats();
+                    if (stats != null) {
+                        hits += stats.getHits();
+                        misses += stats.getMisses();
+                        evictions += stats.getEvictions();
+                        dirtyEvictions += stats.getDirtyEvictions();
+                    }
+                }
+            }
+        }
+
+        long total = hits + misses;
+        double ratio = total == 0L ? 0.0 : (double) hits / total;
+        String ratioStr = String.format(java.util.Locale.ROOT, "%.2f%%", ratio * 100.0);
+
+        List<String> cols = List.of("metric", "value");
+        List<Row> rows = List.of(
+                new Row(Map.of("metric", "hits", "value", String.valueOf(hits))),
+                new Row(Map.of("metric", "misses", "value", String.valueOf(misses))),
+                new Row(Map.of("metric", "hit_ratio", "value", ratioStr)),
+                new Row(Map.of("metric", "evictions", "value", String.valueOf(evictions))),
+                new Row(Map.of("metric", "dirty_evictions", "value", String.valueOf(dirtyEvictions)))
+        );
+        return QueryResult.select(rows, cols);
+    }
+
+    private QueryResult getActiveTransactionsStatus() {
+        List<String> cols = List.of("txn_id", "state", "isolation_level", "start_time_millis");
+        List<Row> rows = new ArrayList<>();
+        for (dev.koradb.transaction.Transaction txn : transactionManager.getActiveTransactions()) {
+            rows.add(new Row(Map.of(
+                    "txn_id", String.valueOf(txn.getId().value()),
+                    "state", txn.getState().name(),
+                    "isolation_level", txn.getIsolationLevel().name(),
+                    "start_time_millis", String.valueOf(txn.getStartTimeMillis())
+            )));
+        }
+        return QueryResult.select(rows, cols);
     }
 
     /**
