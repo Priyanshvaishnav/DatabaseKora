@@ -4,7 +4,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-blue)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Build-Maven-orange)](https://maven.apache.org/)
-[![Status](https://img.shields.io/badge/Milestone-10%20MVCC-green)](#milestones)
+[![Status](https://img.shields.io/badge/Milestone-11%20Server%20%26%20CLI-green)](#milestones)
 
 ---
 
@@ -64,8 +64,8 @@ Storage Engine (Pages on disk)                        ← Phase 2
 | 8 | Write-Ahead Logging | ✅ Complete |
 | 9 | Crash Recovery (ARIES) | ✅ Complete |
 | 10 | MVCC | ✅ Complete |
-| 11 | Database Server + CLI | 🔜 Next |
-| 12 | Replication | ⬜ |
+| 11 | Database Server + CLI | ✅ Complete |
+| 12 | Replication | 🔜 Next |
 | 13 | Observability | ⬜ |
 | 14 | Docker + Kubernetes | ⬜ |
 | 15 | Benchmarks | ⬜ |
@@ -141,6 +141,35 @@ db.execute("COMMIT");
 long reclaimedVersions = db.vacuum();
 ```
 
+### Start the TCP Server & Connect via CLI
+
+```bash
+# Start the KoraDB TCP server (default port 8765, Java 21 Virtual Threads)
+mvn exec:java -pl kora-server -Dexec.mainClass="dev.koradb.server.ServerMain"
+
+# Connect with the interactive terminal CLI REPL
+mvn exec:java -pl kora-cli -Dexec.mainClass="dev.koradb.cli.Main"
+
+# Or execute a one-shot query from terminal
+mvn exec:java -pl kora-cli -Dexec.mainClass="dev.koradb.cli.Main" -Dexec.args="-e 'SHOW DATABASES;'"
+```
+
+### Connect via Java Client Driver
+
+```java
+try (KoraClient client = KoraClient.connect("localhost", 8765)) {
+    client.execute("CREATE DATABASE store");
+    client.execute("USE store");
+    client.execute("CREATE TABLE items (id INT, name VARCHAR, price DOUBLE)");
+    client.execute("INSERT INTO items VALUES (1, 'SSD', 120.0)");
+
+    ClientQueryResult res = client.execute("SELECT * FROM items");
+    for (List<Object> row : res.rows()) {
+        System.out.println(row);
+    }
+}
+```
+
 ---
 
 ## Module Structure
@@ -178,6 +207,7 @@ kora-db/
 | [WAL](docs/wal.md) | Write-Ahead Logging ← Phase 8 |
 | [Recovery](docs/recovery.md) | Crash recovery algorithm ← Phase 9 |
 | [MVCC](docs/mvcc.md) | Multi-version concurrency ← Phase 10 |
+| [Server & CLI](docs/server-and-cli.md) | Network TCP server, binary wire protocol & interactive CLI ← Phase 11 |
 | [Replication](docs/replication.md) | WAL-based replication ← Phase 12 |
 | [Observability](docs/observability.md) | Metrics and tracing ← Phase 13 |
 | [Benchmarks](docs/benchmarks.md) | Performance results ← Phase 15 |

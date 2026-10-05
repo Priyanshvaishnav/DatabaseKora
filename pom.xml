@@ -50,6 +50,16 @@
                 <artifactId>kora-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
+            <dependency>
+                <groupId>dev.koradb</groupId>
+                <artifactId>kora-server</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>dev.koradb</groupId>
+                <artifactId>kora-cli</artifactId>
+                <version>${project.version}</version>
+            </dependency>
 
             <!-- JUnit 5 BOM — imports all junit.version-aligned artifacts -->
             <dependency>
