@@ -73,18 +73,60 @@ Storage Engine (Pages on disk)                        ← Phase 2
 
 ---
 
-## Quick Start
+## Installation & Quick Start
 
-### Prerequisites
+### 1. One-Line Install (Recommended)
 
-- Java 21
-- Maven 3.9+
+No need to clone or compile. Install pre-built binaries in seconds:
 
-### Build
+- **macOS / Linux**:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/Priyanshvaishnav/DatabaseKora/main/install.sh | bash
+  ```
+
+- **Windows (PowerShell)**:
+  ```powershell
+  irm https://raw.githubusercontent.com/Priyanshvaishnav/DatabaseKora/main/install.ps1 | iex
+  ```
+
+Once installed, use the unified `koradb` command anywhere:
+```bash
+koradb server --port 8765         # Starts the database server
+koradb                            # Launches the interactive CLI & AI prompt
+```
+
+---
+
+### 2. Instant Run with Docker
+
+Run KoraDB immediately without installing Java:
 
 ```bash
-cd kora-db
-mvn clean install
+# Start standalone server
+docker run -d -p 8765:8765 --name koradb ghcr.io/priyanshvaishnav/koradb:latest
+
+# Connect with the interactive CLI
+docker run -it --rm --network host ghcr.io/priyanshvaishnav/koradb:latest cli
+```
+
+Or spin up a high-availability cluster with replication, Prometheus, and Grafana:
+```bash
+docker compose up -d
+```
+
+---
+
+### 3. Build from Source (Contributors)
+
+#### Prerequisites
+- Java 21+
+- Maven 3.9+
+
+```bash
+git clone https://github.com/Priyanshvaishnav/DatabaseKora.git
+cd DatabaseKora
+mvn clean package -DskipTests
+./bin/koradb server --port 8765
 ```
 
 ### Run All Tests
