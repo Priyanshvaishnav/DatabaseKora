@@ -1,8 +1,16 @@
 package dev.koradb.cli;
 
+import dev.koradb.ai.engine.KoraAiEngine;
+import dev.koradb.ai.model.ExplanationResult;
+import dev.koradb.ai.model.OptimizationReport;
+import dev.koradb.ai.model.TranslationResult;
+import dev.koradb.ai.schema.DatabaseSchema;
+import dev.koradb.ai.schema.SchemaExtractor;
 import dev.koradb.client.ClientQueryResult;
 import dev.koradb.client.KoraClient;
 import dev.koradb.client.KoraClientException;
+import dev.koradb.sql.ast.ColumnDef;
+import dev.koradb.sql.ast.DataType;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -10,6 +18,10 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Interactive Command-Line Interface and REPL for KoraDB.
@@ -31,6 +43,7 @@ public final class KoraCli {
     private final BufferedReader reader;
     private final PrintStream out;
     private String currentDatabase;
+    private KoraAiEngine aiEngine = new KoraAiEngine();
 
     public KoraCli(CliConfig config, InputStream in, PrintStream out) {
         this.config = config;
@@ -200,12 +213,126 @@ public final class KoraCli {
                 out.printf("Server:      %s%n", client.getServerVersion());
                 out.printf("Session ID:  %d%n", client.getConnectionId());
                 out.printf("Database:    %s%n", currentDatabase.isEmpty() ? "(none)" : currentDatabase);
+                out.printf("AI Provider: %s (%s)%n", aiEngine.getActiveProvider(), aiEngine.getActiveModel());
+            }
+            case "\\ai", "\\ask" -> {
+                if (arg.isEmpty()) {
+                    out.println("Usage: \\ai <natural language prompt>");
+                } else {
+                    handleAiQuery(client, arg);
+                }
+            }
+            case "\\explain-ai" -> {
+                if (arg.isEmpty()) {
+                    out.println("Usage: \\explain-ai <sql_query>");
+                } else {
+                    handleAiExplain(client, arg);
+                }
+            }
+            case "\\advisor" -> {
+                if (arg.isEmpty()) {
+                    out.println("Usage: \\advisor <sql_query>");
+                } else {
+                    handleAiAdvisor(client, arg);
+                }
+            }
+            case "\\ai-provider" -> {
+                if (arg.isEmpty()) {
+                    out.printf("Active AI Provider: %s (model: %s)%n", aiEngine.getActiveProvider(), aiEngine.getActiveModel());
+                    out.println("Supported providers: rule-based, openai, gemini, anthropic");
+                    out.println("Usage: \\ai-provider <provider_name>");
+                } else {
+                    try {
+                        aiEngine = KoraAiEngine.withProvider(arg);
+                        out.printf("Switched AI provider to: %s (model: %s)%n", aiEngine.getActiveProvider(), aiEngine.getActiveModel());
+                    } catch (Exception e) {
+                        out.println("Failed to switch AI provider: " + e.getMessage());
+                    }
+                }
             }
             default -> {
                 out.println("Unknown command: " + meta + ". Type \\h for help.");
             }
         }
         return false;
+    }
+
+    private void handleAiQuery(KoraClient client, String prompt) {
+        DatabaseSchema schema = fetchDatabaseSchema(client);
+        out.println("Translating with KoraDB AI (" + aiEngine.getActiveProvider() + ")...");
+        TranslationResult tr = aiEngine.translate(prompt, schema);
+
+        out.println();
+        out.println("Generated SQL: " + tr.generatedSql());
+        out.printf("Provider:      %s (%s) [%dms]%n", tr.provider(), tr.model(), tr.durationMillis());
+
+        if (!tr.isValid()) {
+            out.println("Validation Warning: " + tr.errorMessage());
+        }
+
+        out.print("Execute query? [Y/n]: ");
+        out.flush();
+        try {
+            String answer = reader.readLine();
+            if (answer == null || answer.isBlank() || answer.trim().equalsIgnoreCase("y") || answer.trim().equalsIgnoreCase("yes")) {
+                executeSql(client, tr.generatedSql());
+            } else {
+                out.println("Execution cancelled.");
+            }
+        } catch (IOException e) {
+            out.println("Cancelled.");
+        }
+    }
+
+    private void handleAiExplain(KoraClient client, String sql) {
+        DatabaseSchema schema = fetchDatabaseSchema(client);
+        ExplanationResult er = aiEngine.explain(sql, schema);
+        out.println();
+        out.println(er.explanation());
+    }
+
+    private void handleAiAdvisor(KoraClient client, String sql) {
+        DatabaseSchema schema = fetchDatabaseSchema(client);
+        OptimizationReport rep = aiEngine.advise(sql, schema);
+        out.println();
+        out.println(rep.analysis());
+        if (!rep.recommendedIndexDdls().isEmpty()) {
+            out.println("\nRecommended DDL Statements:");
+            for (String ddl : rep.recommendedIndexDdls()) {
+                out.println("  " + ddl);
+            }
+        }
+    }
+
+    private DatabaseSchema fetchDatabaseSchema(KoraClient client) {
+        if (currentDatabase == null || currentDatabase.isBlank()) {
+            return null;
+        }
+        try {
+            ClientQueryResult tablesResult = client.execute("SHOW TABLES;");
+            Map<String, List<ColumnDef>> tableCols = new LinkedHashMap<>();
+            for (List<Object> row : tablesResult.rows()) {
+                if (row.isEmpty()) continue;
+                String tableName = String.valueOf(row.get(0));
+                ClientQueryResult descResult = client.execute("DESCRIBE " + tableName + ";");
+                List<ColumnDef> cols = new ArrayList<>();
+                for (List<Object> colRow : descResult.rows()) {
+                    if (colRow.size() < 2) continue;
+                    String colName = String.valueOf(colRow.get(0));
+                    String typeStr = String.valueOf(colRow.get(1)).toUpperCase();
+                    try {
+                        DataType dt = DataType.valueOf(typeStr);
+                        cols.add(new ColumnDef(colName, dt));
+                    } catch (IllegalArgumentException ignored) {
+                        cols.add(new ColumnDef(colName, DataType.VARCHAR));
+                    }
+                }
+                tableCols.put(tableName, cols);
+            }
+            return SchemaExtractor.fromMetadata(currentDatabase, tableCols, Map.of());
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private void printReplHelp() {
@@ -217,6 +344,10 @@ public final class KoraCli {
                   \\c   <db_name>        Connect to / use database
                   \\c                    Clear the current multi-line query buffer
                   \\s,  \\status          Display server and connection status
+                  \\ai  <prompt>         Natural language query (ask AI and execute)
+                  \\explain-ai <sql>     Explain query plan in plain English
+                  \\advisor <sql>        Analyze query and recommend B+ Tree indexes
+                  \\ai-provider [name]   Display or switch active AI provider
                   \\h,  \\help            Display this help screen
                   \\q,  \\quit            Exit KoraDB CLI
 

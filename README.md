@@ -4,7 +4,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-blue)](https://openjdk.org/projects/jdk/21/)
 [![Maven](https://img.shields.io/badge/Build-Maven-orange)](https://maven.apache.org/)
-[![Status](https://img.shields.io/badge/Milestone-15%20Benchmarks-green)](#milestones)
+[![Status](https://img.shields.io/badge/Milestones-All%2016%20Complete-brightgreen)](#milestones)
 
 ---
 
@@ -69,7 +69,7 @@ Storage Engine (Pages on disk)                        ← Phase 2
 | 13 | Observability | ✅ Complete |
 | 14 | Docker + Kubernetes | ✅ Complete |
 | 15 | Benchmarks | ✅ Complete |
-| 16 | AI Layer | 🔜 Next |
+| 16 | AI Layer | ✅ Complete |
 
 ---
 
@@ -261,6 +261,33 @@ java -jar benchmarks/target/benchmarks.jar --suite tx
 java -jar benchmarks/target/benchmarks.jar --jmh
 ```
 
+### AI Assistant (Natural Language → SQL, Explainer & Advisor)
+
+```bash
+# In the interactive CLI:
+koradb-cli
+kora [(none)]> USE store;
+
+# 1. Translate natural language into verified SQL and execute
+kora [store]> \ai find all customers who signed up after 2024
+Translating with KoraDB AI (rule-based)...
+Generated SQL: SELECT * FROM customers WHERE signup_year > 2024;
+Execute query? [Y/n]: y
+
+# 2. Explain query plan in plain English
+kora [store]> \explain-ai SELECT * FROM orders WHERE amount > 500;
+
+# 3. Analyze query for missing B+ Tree indexes and generate DDL
+kora [store]> \advisor SELECT * FROM orders WHERE customer_id = 42;
+```
+
+Or programmatically in Java:
+```java
+KoraAi ai = KoraAi.builder().database(db).provider("rule-based").build();
+TranslationResult res = ai.translate("find users older than 25");
+System.out.println(res.generatedSql()); // SELECT * FROM users WHERE age > 25;
+```
+
 ---
 
 ## Module Structure
@@ -303,6 +330,7 @@ kora-db/
 | [Observability](docs/observability.md) | Prometheus metrics, HTTP exporter, OTel tracing & Grafana ← Phase 13 |
 | [Docker & Kubernetes](docs/docker-and-kubernetes.md) | Multi-stage Docker, Compose cluster, k8s StatefulSets & Helm chart ← Phase 14 |
 | [Benchmarks](docs/benchmarks.md) | Performance results ← Phase 15 |
+| [AI Layer](docs/ai-layer.md) | Natural language to SQL, query explainer & index optimization advisor ← Phase 16 |
 
 ---
 

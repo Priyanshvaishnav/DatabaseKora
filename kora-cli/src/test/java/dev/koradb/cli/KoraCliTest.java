@@ -122,4 +122,47 @@ class KoraCliTest {
         assertThat(output).contains("Connection:  127.0.0.1:" + port); // \status
         assertThat(output).contains("Bye");
     }
+
+    @Test
+    @DisplayName("Should support AI CLI meta-commands (\\ai, \\explain-ai, \\advisor, \\ai-provider)")
+    void testAiReplCommands() {
+        int port = server.getPort();
+
+        String inputScript = """
+                CREATE DATABASE shop;
+                USE shop;
+                CREATE TABLE items (
+                    id INT,
+                    name VARCHAR,
+                    price DOUBLE
+                );
+                INSERT INTO items VALUES (1, 'Keyboard', 75.0);
+                INSERT INTO items VALUES (2, 'Mouse', 25.0);
+                \\ai-provider
+                \\ai-provider rule-based
+                \\explain-ai SELECT * FROM items WHERE price > 50;
+                \\advisor SELECT * FROM items WHERE price > 50;
+                \\ai get all items where price > 50
+                y
+                \\q
+                """;
+
+        ByteArrayInputStream in = new ByteArrayInputStream(inputScript.getBytes(StandardCharsets.UTF_8));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        CliConfig config = CliConfig.parse(new String[]{"--port", String.valueOf(port)});
+        KoraCli cli = new KoraCli(config, in, new PrintStream(out));
+
+        int exitCode = cli.start();
+        assertThat(exitCode).isEqualTo(0);
+
+        String output = out.toString(StandardCharsets.UTF_8);
+        assertThat(output).contains("Active AI Provider: rule-based");
+        assertThat(output).contains("Switched AI provider to: rule-based");
+        assertThat(output).contains("Generated SQL: SELECT * FROM items WHERE price > 50;");
+        assertThat(output).contains("Keyboard");
+        assertThat(output).doesNotContain("Mouse");
+        assertThat(output).contains("CREATE INDEX idx_items_price ON items (price);");
+    }
 }
+
