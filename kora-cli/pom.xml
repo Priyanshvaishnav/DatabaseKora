@@ -27,6 +27,10 @@
             <groupId>dev.koradb</groupId>
             <artifactId>kora-server</artifactId>
         </dependency>
+        <dependency>
+            <groupId>dev.koradb</groupId>
+            <artifactId>kora-ai</artifactId>
+        </dependency>
     </dependencies>
 
     <build>
