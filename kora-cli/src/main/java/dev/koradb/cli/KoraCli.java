@@ -136,6 +136,14 @@ public final class KoraCli {
                 continue;
             }
 
+            // Convenience: single-line administrative commands do not strictly require a semicolon
+            boolean isConvenienceCmd = buffer.isEmpty() && (
+                    trimmed.toUpperCase().startsWith("SHOW ") ||
+                    trimmed.toUpperCase().startsWith("DESCRIBE ") ||
+                    trimmed.toUpperCase().startsWith("DESC ") ||
+                    trimmed.toUpperCase().startsWith("USE ")
+            );
+
             // Accumulate query
             if (buffer.isEmpty()) {
                 buffer.append(line);
@@ -143,10 +151,13 @@ public final class KoraCli {
                 buffer.append(" ").append(line);
             }
 
-            // Check if query is terminated by semicolon
-            if (trimmed.endsWith(";")) {
+            // Check if query is terminated by semicolon or is a convenience command
+            if (trimmed.endsWith(";") || isConvenienceCmd) {
                 String sql = buffer.toString().trim();
                 buffer.setLength(0);
+                if (!sql.endsWith(";")) {
+                    sql = sql + ";";
+                }
                 executeSql(client, sql);
             }
         }

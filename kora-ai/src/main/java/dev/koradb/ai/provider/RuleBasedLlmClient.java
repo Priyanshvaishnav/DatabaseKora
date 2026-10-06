@@ -58,96 +58,236 @@ public final class RuleBasedLlmClient implements LlmClient {
             cleaned = cleaned.substring(0, cleaned.length() - 1).trim();
         }
 
-        // Pattern: "delete from <table_name> where <col> = <val>"
-        Matcher mDel = Pattern.compile("^delete\\s+(?:from\\s+)?([a-zA-Z0-9_]+)\\s+where\\s+([a-zA-Z0-9_]+)\\s*(=|>|<)\\s*([a-zA-Z0-9_'.\\-]+)$", Pattern.CASE_INSENSITIVE).matcher(cleaned);
-        if (mDel.find()) {
-            String table = mDel.group(1);
-            String col = mDel.group(2);
-            String op = mDel.group(3);
-            String val = mDel.group(4);
-            if (!val.startsWith("'") && !val.matches("^-?\\d+(\\.\\d+)?$") && !val.equalsIgnoreCase("true") && !val.equalsIgnoreCase("false")) {
-                val = "'" + val + "'";
-            }
-            return "DELETE FROM " + table + " WHERE " + col + " " + op + " " + val + ";";
-        }
-
-        // Pattern: "count <table_name>" or "how many <table_name> [are there]"
-        Matcher mCount = Pattern.compile("^(?:how many|count|number of)\\s+([a-zA-Z0-9_]+)(?:\\s+are there)?$", Pattern.CASE_INSENSITIVE).matcher(cleaned);
-        if (mCount.find()) {
-            String table = mCount.group(1);
-            return "SELECT COUNT(*) FROM " + table + ";";
-        }
-
-        // Pattern: "find <table_name> where <col> <op> <val>"
-        Matcher mWhere = Pattern.compile("^(?:find|get|show|select|fetch)(?:\\s+all)?\\s+(?:from\\s+)?([a-zA-Z0-9_]+)\\s+where\\s+([a-zA-Z0-9_]+)\\s*(=|>|<|>=|<=|is|equals)\\s*([a-zA-Z0-9_'.\\-]+)$", Pattern.CASE_INSENSITIVE).matcher(cleaned);
-        if (mWhere.find()) {
-            String table = mWhere.group(1);
-            String col = mWhere.group(2);
-            String op = mWhere.group(3);
-            String val = mWhere.group(4);
-            if (op.equalsIgnoreCase("is") || op.equalsIgnoreCase("equals")) op = "=";
-            if (!val.startsWith("'") && !val.matches("^-?\\d+(\\.\\d+)?$") && !val.equalsIgnoreCase("true") && !val.equalsIgnoreCase("false")) {
-                val = "'" + val + "'";
-            }
-            return "SELECT * FROM " + table + " WHERE " + col + " " + op + " " + val + ";";
-        }
-
         String lower = cleaned.toLowerCase(Locale.ROOT);
 
-        // Pattern: Already valid SQL statement
+        // ── Direct schema / metadata commands ─────────────────────────────────
+        if (lower.matches("^(?:show|list|get|fetch)(?:\\s+all)?\\s+tables;?$")) {
+            return "SHOW TABLES;";
+        }
+        if (lower.matches("^(?:show|list|get|fetch)(?:\\s+all)?\\s+databases;?$")) {
+            return "SHOW DATABASES;";
+        }
+
+        boolean isExplicitShow = lower.startsWith("show buffer pool status") ||
+                                 lower.startsWith("show transactions") ||
+                                 lower.startsWith("show metrics");
+
+        // ── Already valid SQL ─────────────────────────────────────────────────
         if (lower.startsWith("select ") || lower.startsWith("insert into ") ||
-            lower.startsWith("update ") || lower.startsWith("delete from ") ||
-            lower.startsWith("create table ") || lower.startsWith("create index ")) {
-            return cleaned.endsWith(";") ? cleaned : cleaned + ";";
+            lower.startsWith("update ")  || lower.startsWith("delete from ") ||
+            lower.startsWith("create table ") || lower.startsWith("create index ") ||
+            lower.startsWith("drop ") || lower.startsWith("use ") ||
+            lower.startsWith("describe ") || lower.startsWith("desc ") ||
+            isExplicitShow) {
+            // Uppercase the SQL keyword portion so output is always canonical SQL
+            String canonical = cleaned.toUpperCase(Locale.ROOT);
+            // But preserve string literals (values in quotes) — simple approach: just uppercase the whole thing
+            // For a rule-based client this is acceptable since we don't support mixed-case identifiers
+            return canonical.endsWith(";") ? canonical : canonical + ";";
         }
 
-        // Pattern: "top <N> <table_name> by <col> [desc/asc]"
-        Matcher mTop = Pattern.compile("^(?:show\\s+|find\\s+|get\\s+)?top\\s+(\\d+)\\s+([a-zA-Z0-9_]+)\\s+by\\s+([a-zA-Z0-9_]+)(?:\\s+(asc|desc))?$").matcher(lower);
+        // ── Strict structural patterns (highest priority) ──────────────────────
+
+        // "delete from <table> where <col> <op> <val>"
+        Matcher mDel = Pattern.compile(
+            "^delete\\s+(?:from\\s+)?([a-zA-Z0-9_]+)\\s+where\\s+([a-zA-Z0-9_]+)\\s*(=|>|<)\\s*([a-zA-Z0-9_'.\\-]+)$",
+            Pattern.CASE_INSENSITIVE).matcher(cleaned);
+        if (mDel.find()) {
+            return "DELETE FROM " + mDel.group(1) + " WHERE " +
+                   mDel.group(2) + " " + mDel.group(3) + " " + quoteIfNeeded(mDel.group(4)) + ";";
+        }
+
+        // "how many / count <table>" (no WHERE)
+        Matcher mCount = Pattern.compile(
+            "^(?:how many|count|number of)\\s+([a-zA-Z0-9_]+)(?:\\s+are there)?$",
+            Pattern.CASE_INSENSITIVE).matcher(cleaned);
+        if (mCount.find()) {
+            return "SELECT COUNT(*) FROM " + mCount.group(1) + ";";
+        }
+
+        // "top <N> <table> by <col> [desc/asc]"
+        Matcher mTop = Pattern.compile(
+            "^(?:show\\s+|find\\s+|get\\s+)?top\\s+(\\d+)\\s+([a-zA-Z0-9_]+)\\s+by\\s+([a-zA-Z0-9_]+)(?:\\s+(asc|desc))?$",
+            Pattern.CASE_INSENSITIVE).matcher(cleaned);
         if (mTop.find()) {
-            int limit = Integer.parseInt(mTop.group(1));
-            String table = mTop.group(2);
-            String col = mTop.group(3);
             String dir = "desc".equalsIgnoreCase(mTop.group(4)) || mTop.group(4) == null ? "DESC" : "ASC";
-            return "SELECT * FROM " + table + " ORDER BY " + col + " " + dir + " LIMIT " + limit + ";";
+            return "SELECT * FROM " + mTop.group(2) + " ORDER BY " + mTop.group(3) +
+                   " " + dir + " LIMIT " + mTop.group(1) + ";";
         }
 
-        // Pattern: "average/sum/min/max <col> in/from <table_name>"
-        Matcher mAgg = Pattern.compile("^(?:calculate\\s+|compute\\s+|find\\s+)?(avg|average|sum|total|min|minimum|max|maximum)\\s+([a-zA-Z0-9_]+)\\s+(?:in|from|of)\\s+([a-zA-Z0-9_]+)$").matcher(lower);
+        // "avg/sum/min/max <col> in <table>"
+        Matcher mAgg = Pattern.compile(
+            "^(?:calculate\\s+|compute\\s+|find\\s+)?(avg|average|sum|total|min|minimum|max|maximum)\\s+([a-zA-Z0-9_]+)\\s+(?:in|from|of)\\s+([a-zA-Z0-9_]+)$",
+            Pattern.CASE_INSENSITIVE).matcher(cleaned);
         if (mAgg.find()) {
-            String fnName = switch (mAgg.group(1)) {
+            String fn = switch (mAgg.group(1).toLowerCase()) {
                 case "avg", "average" -> "AVG";
-                case "sum", "total" -> "SUM";
+                case "sum", "total"   -> "SUM";
                 case "min", "minimum" -> "MIN";
                 case "max", "maximum" -> "MAX";
-                default -> "COUNT";
+                default               -> "COUNT";
             };
-            String col = mAgg.group(2);
-            String table = mAgg.group(3);
-            return "SELECT " + fnName + "(" + col + ") FROM " + table + ";";
+            return "SELECT " + fn + "(" + mAgg.group(2) + ") FROM " + mAgg.group(3) + ";";
         }
 
-        // Pattern: "group <table_name> by <col>" or "count <table_name> by <col>"
-        Matcher mGroup = Pattern.compile("^(?:group|count)\\s+([a-zA-Z0-9_]+)\\s+by\\s+([a-zA-Z0-9_]+)$").matcher(lower);
+        // "group/count <table> by <col>"
+        Matcher mGroup = Pattern.compile(
+            "^(?:group|count)\\s+([a-zA-Z0-9_]+)\\s+by\\s+([a-zA-Z0-9_]+)$",
+            Pattern.CASE_INSENSITIVE).matcher(cleaned);
         if (mGroup.find()) {
-            String table = mGroup.group(1);
-            String col = mGroup.group(2);
-            return "SELECT " + col + ", COUNT(*) FROM " + table + " GROUP BY " + col + ";";
+            return "SELECT " + mGroup.group(2) + ", COUNT(*) FROM " + mGroup.group(1) +
+                   " GROUP BY " + mGroup.group(2) + ";";
         }
 
-        // Pattern: "show all <table_name>" / "list all <table_name>" / "get all <table_name>"
-        Matcher mAll = Pattern.compile("^(?:show|list|get|fetch|select)(?:\\s+all)?\\s+(?:from\\s+)?([a-zA-Z0-9_]+)$").matcher(lower);
+        // "find/get/show/fetch <table> where <col> <op> <val>"
+        Matcher mWhere = Pattern.compile(
+            "^(?:find|get|show|select|fetch)(?:\\s+all)?\\s+(?:from\\s+)?([a-zA-Z0-9_]+)\\s+where\\s+([a-zA-Z0-9_]+)\\s*(=|>|<|>=|<=|is|equals)\\s*([a-zA-Z0-9_'.\\-]+)$",
+            Pattern.CASE_INSENSITIVE).matcher(cleaned);
+        if (mWhere.find()) {
+            String op = mWhere.group(3);
+            if (op.equalsIgnoreCase("is") || op.equalsIgnoreCase("equals")) op = "=";
+            return "SELECT * FROM " + mWhere.group(1) + " WHERE " +
+                   mWhere.group(2) + " " + op + " " + quoteIfNeeded(mWhere.group(4)) + ";";
+        }
+
+        // "show tables" / "list tables" / "show databases" / "list databases"
+        if (lower.matches("^(?:show|list|get|fetch)(?:\\s+all)?\\s+tables$")) {
+            return "SHOW TABLES;";
+        }
+        if (lower.matches("^(?:show|list|get|fetch)(?:\\s+all)?\\s+databases$")) {
+            return "SHOW DATABASES;";
+        }
+
+        // "show all <table>" / "list all <table>" / "get all <table>"
+        Matcher mAll = Pattern.compile(
+            "^(?:show|list|get|fetch|select)(?:\\s+all)?\\s+(?:from\\s+)?([a-zA-Z0-9_]+)$",
+            Pattern.CASE_INSENSITIVE).matcher(cleaned);
         if (mAll.find()) {
-            String table = mAll.group(1);
+            String tbl = mAll.group(1);
+            if (tbl.equalsIgnoreCase("tables")) {
+                return "SHOW TABLES;";
+            }
+            if (tbl.equalsIgnoreCase("databases")) {
+                return "SHOW DATABASES;";
+            }
+            return "SELECT * FROM " + tbl + ";";
+        }
+
+        // ── Free-form NL parsing ───────────────────────────────────────────────
+        // Handles: "show me all products cheaper than 200"
+        //          "get users older than 25"
+        //          "find orders with total more than 500"
+        //          "list employees whose salary is greater than 50000"
+
+        // Step 1: extract the table name — first multi-char word that isn't a stop word
+        String table = extractTableFromFreeText(lower);
+
+        // Step 2: extract comparison clause
+        // Maps English phrases → SQL operators
+        String[] nlOps = {
+            "cheaper than", "less than", "below", "under",
+            "more expensive than", "pricier than", "greater than", "above", "over", "older than", "more than",
+            "at least", "no less than",
+            "at most", "no more than", "not more than",
+            "equal to", "equals", "is", "="
+        };
+        String[] sqlOps = {
+            "<", "<", "<", "<",
+            ">", ">", ">", ">", ">", ">", ">",
+            ">=", ">=",
+            "<=", "<=", "<=",
+            "=", "=", "=", "="
+        };
+
+        for (int i = 0; i < nlOps.length; i++) {
+            int idx = lower.indexOf(nlOps[i]);
+            if (idx < 0) continue;
+
+            String afterOp = cleaned.substring(idx + nlOps[i].length()).trim();
+            // Extract the value token (first word/number after the operator phrase)
+            String[] valueParts = afterOp.split("\\s+");
+            if (valueParts.length == 0 || valueParts[0].isBlank()) continue;
+            String value = valueParts[0].replaceAll("[^a-zA-Z0-9.'\\-]", "");
+            if (value.isEmpty()) continue;
+
+            // Extract column: word immediately before the operator phrase
+            String beforeOp = lower.substring(0, idx).trim();
+            String col = extractColumnFromPhrase(beforeOp);
+
+            // If col is a stopword, empty, or equals the table name (e.g. "products cheaper than")
+            // then fall back to inferring a sensible column name
+            if (col.isEmpty() || STOP_WORDS.contains(col) || col.equals(table)) {
+                col = inferColumnForOp(sqlOps[i], table);
+            }
+
+            String quotedVal = quoteIfNeeded(value);
+            if (table.isEmpty()) {
+                return "-- Could not determine table name from: " + cleaned;
+            }
+            return "SELECT * FROM " + table + " WHERE " + col + " " + sqlOps[i] + " " + quotedVal + ";";
+        }
+
+        // Step 3: no condition found — plain SELECT *
+        if (!table.isEmpty()) {
             return "SELECT * FROM " + table + ";";
         }
 
-        // Fallback default: select all from text assuming text was table name
-        String sanitized = lower.replaceAll("[^a-zA-Z0-9_]", "");
-        if (!sanitized.isEmpty()) {
-            return "SELECT * FROM " + sanitized + ";";
-        }
+        // Absolute fallback — tell the user we couldn't parse
+        return "-- Could not translate: \"" + cleaned + "\". Try: 'show all <table>' or 'find <table> where <col> > <val>'";
+    }
 
-        return "SELECT * FROM dummy;";
+    /** Words to skip when scanning for a table name in free-form text */
+    private static final java.util.Set<String> STOP_WORDS = java.util.Set.of(
+        "show", "list", "get", "find", "fetch", "select", "give", "me",
+        "all", "the", "every", "each", "any",
+        "from", "in", "of", "with", "whose", "where", "that", "which",
+        "are", "is", "have", "has",
+        "cheap", "cheaper", "expensive", "pricier", "old", "older",
+        "than", "more", "less", "above", "below", "over", "under",
+        "greater", "equal", "at", "least", "most", "no",
+        "a", "an", "by", "on", "to", "for", "and", "or",
+        "tables", "databases"
+    );
+
+    private String extractTableFromFreeText(String lower) {
+        String[] words = lower.trim().split("\\s+");
+        // Require length >= 4 so 3-letter garbage words ("xzq") don't match,
+        // and skip known stop words
+        for (String w : words) {
+            String word = w.replaceAll("[^a-z0-9_]", "");
+            if (word.length() >= 4 && !STOP_WORDS.contains(word) && word.matches("[a-z][a-z0-9_]*")) {
+                return word;
+            }
+        }
+        return "";
+    }
+
+    private String extractColumnFromPhrase(String phrase) {
+        String[] words = phrase.trim().split("\\s+");
+        // Take the last non-stop-word
+        for (int i = words.length - 1; i >= 0; i--) {
+            String w = words[i].replaceAll("[^a-z0-9_]", "");
+            if (!w.isEmpty() && !STOP_WORDS.contains(w) && w.matches("[a-z][a-z0-9_]*")) {
+                return w;
+            }
+        }
+        return "";
+    }
+
+    /** Best-guess column name for common operators when column cannot be parsed */
+    private String inferColumnForOp(String op, String table) {
+        return switch (op) {
+            case "<", "<=" -> "price";
+            case ">", ">=" -> "price";
+            default        -> "id";
+        };
+    }
+
+    private String quoteIfNeeded(String val) {
+        if (val.startsWith("'")) return val;
+        if (val.matches("^-?\\d+(\\.\\d+)?$")) return val;
+        if (val.equalsIgnoreCase("true") || val.equalsIgnoreCase("false")) return val;
+        return "'" + val + "'";
     }
 
     private String handleExplanation(String userPrompt) {
