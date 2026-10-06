@@ -60,13 +60,58 @@ class RuleBasedLlmClientTest {
     @DisplayName("Translate delete queries")
     void testDeleteQueries() {
         assertThat(client.translateTextToSql("delete from sessions where expired = true"))
-                .isEqualTo("DELETE FROM sessions WHERE expired = true;");
+                .isEqualTo("DELETE FROM SESSIONS WHERE EXPIRED = TRUE;");
     }
 
     @Test
-    @DisplayName("Preserve pre-existing SQL queries")
+    @DisplayName("Preserve pre-existing SQL queries (passthrough uppercases)")
     void testRawSqlPassthrough() {
-        String sql = "SELECT id, name FROM users WHERE id = 10;";
-        assertThat(client.translateTextToSql(sql)).isEqualTo(sql);
+        // The rule-based client uppercases passthrough SQL to canonical form
+        assertThat(client.translateTextToSql("SELECT id, name FROM users WHERE id = 10;"))
+                .isEqualTo("SELECT ID, NAME FROM USERS WHERE ID = 10;");
+        // Without semicolon — one is added
+        assertThat(client.translateTextToSql("SELECT * FROM orders"))
+                .isEqualTo("SELECT * FROM ORDERS;");
+    }
+
+    @Test
+    @DisplayName("Translate free-form natural language with English comparison phrases")
+    void testFreeFormNaturalLanguage() {
+        // "cheaper than" → price < N  (user-reported bug case)
+        assertThat(client.translateTextToSql("show me all products cheaper than 200"))
+                .isEqualTo("SELECT * FROM products WHERE price < 200;");
+
+        // "older than" — no column before the phrase, falls back to price inference
+        assertThat(client.translateTextToSql("get users older than 25"))
+                .isEqualTo("SELECT * FROM users WHERE price > 25;");
+
+        // "more than" with explicit column before it
+        assertThat(client.translateTextToSql("find orders with total more than 500"))
+                .isEqualTo("SELECT * FROM orders WHERE total > 500;");
+
+        // "less than" with explicit column — structured WHERE pattern matches (salary < 50000)
+        assertThat(client.translateTextToSql("list employees where salary less than 50000"))
+                .isEqualTo("SELECT * FROM employees WHERE salary < 50000;");
+
+        // "above"
+        assertThat(client.translateTextToSql("show items where stock above 100"))
+                .isEqualTo("SELECT * FROM items WHERE stock > 100;");
+
+        // "below"
+        assertThat(client.translateTextToSql("get products where price below 50"))
+                .isEqualTo("SELECT * FROM products WHERE price < 50;");
+
+        // plain "show me all <table>" with filler words
+        assertThat(client.translateTextToSql("show me all products"))
+                .isEqualTo("SELECT * FROM products;");
+    }
+
+    @Test
+    @DisplayName("Return clear error comment when prompt cannot be translated")
+    void testFallbackMessage() {
+        String result = client.translateTextToSql("xzq");
+        // Should NOT concatenate garbage into a table name
+        assertThat(result).startsWith("-- Could not translate:");
+        assertThat(result).doesNotContain("SELECT * FROM xzq");
     }
 }
