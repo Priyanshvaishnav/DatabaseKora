@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# KoraDB Unified CLI & Server Launcher
+# ==============================================================================
+set -e
+
+# Resolve script directory (dereferencing symlinks)
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+BIN_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+KORA_HOME="$( cd -P "$BIN_DIR/.." >/dev/null 2>&1 && pwd )"
+
+# Check for Java 21+
+if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+    JAVA_CMD="$JAVA_HOME/bin/java"
+elif command -v java >/dev/null 2>&1; then
+    JAVA_CMD="java"
+else
+    echo "ERROR: Java is not installed or not in PATH." >&2
+    echo "KoraDB requires Java 21 or higher." >&2
+    echo "Download it from: https://adoptium.net/temurin/releases/?version=21" >&2
+    exit 1
+fi
+
+JAVA_VER=$("$JAVA_CMD" -version 2>&1 | awk -F '"' '/version/ {print $2}' | cut -d'.' -f1)
+if [ -n "$JAVA_VER" ] && [ "$JAVA_VER" -lt 21 ] 2>/dev/null; then
+    echo "WARNING: Detected Java version $JAVA_VER. KoraDB requires Java 21+." >&2
+fi
+
+# Locate JARs (support both installed layout in lib/ and development repo layout in */target/)
+SERVER_JAR=""
+CLI_JAR=""
+BENCH_JAR=""
+
+if [ -f "$KORA_HOME/lib/koradb-server.jar" ]; then
+    SERVER_JAR="$KORA_HOME/lib/koradb-server.jar"
+    CLI_JAR="$KORA_HOME/lib/koradb-cli.jar"
+    BENCH_JAR="$KORA_HOME/lib/benchmarks.jar"
+elif [ -f "$KORA_HOME/kora-server/target/koradb-server.jar" ]; then
+    SERVER_JAR="$KORA_HOME/kora-server/target/koradb-server.jar"
+    CLI_JAR="$KORA_HOME/kora-cli/target/koradb-cli.jar"
+    BENCH_JAR="$KORA_HOME/benchmarks/target/benchmarks.jar"
+fi
+
+show_help() {
+    cat << EOF
+KoraDB - Relational Database Engine Built from Scratch in Java 21
+
+Usage:
+  koradb [command] [options]
+
+Commands:
+  server              Start the KoraDB standalone database server
+  cli                 Start the interactive SQL REPL and AI query client (default)
+  bench               Run the JMH benchmark suite
+  version             Print version information
+  help                Print this help manual
+
+Examples:
+  koradb server --port 8765 --data-dir ./data
+  koradb cli --host 127.0.0.1 --port 8765
+  koradb              (alias for 'koradb cli')
+  koradb -e "SELECT 1;"
+
+EOF
+}
+
+COMMAND="$1"
+
+case "$COMMAND" in
+    server)
+        shift
+        if [ ! -f "$SERVER_JAR" ]; then
+            echo "ERROR: Server JAR not found at $SERVER_JAR" >&2
+            exit 1
+        fi
+        exec "$JAVA_CMD" ${JAVA_OPTS:--XX:+UseZGC -XX:+ZGenerational} -jar "$SERVER_JAR" "$@"
+        ;;
+    cli)
+        shift
+        if [ ! -f "$CLI_JAR" ]; then
+            echo "ERROR: CLI JAR not found at $CLI_JAR" >&2
+            exit 1
+        fi
+        exec "$JAVA_CMD" -jar "$CLI_JAR" "$@"
+        ;;
+    bench|benchmark)
+        shift
+        if [ ! -f "$BENCH_JAR" ]; then
+            echo "ERROR: Benchmarks JAR not found at $BENCH_JAR" >&2
+            exit 1
+        fi
+        exec "$JAVA_CMD" -jar "$BENCH_JAR" "$@"
+        ;;
+    version|-v|--version)
+        echo "KoraDB v0.1.0-SNAPSHOT (Java 21)"
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    *)
+        # Default: if no command is specified or flags are passed (e.g. -e, --port), run CLI
+        if [ ! -f "$CLI_JAR" ]; then
+            echo "ERROR: CLI JAR not found at $CLI_JAR" >&2
+            exit 1
+        fi
+        exec "$JAVA_CMD" -jar "$CLI_JAR" "$@"
+        ;;
+esac
