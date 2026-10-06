@@ -60,10 +60,25 @@ public final class RuleBasedLlmClient implements LlmClient {
 
         String lower = cleaned.toLowerCase(Locale.ROOT);
 
+        // ── Direct schema / metadata commands ─────────────────────────────────
+        if (lower.matches("^(?:show|list|get|fetch)(?:\\s+all)?\\s+tables;?$")) {
+            return "SHOW TABLES;";
+        }
+        if (lower.matches("^(?:show|list|get|fetch)(?:\\s+all)?\\s+databases;?$")) {
+            return "SHOW DATABASES;";
+        }
+
+        boolean isExplicitShow = lower.startsWith("show buffer pool status") ||
+                                 lower.startsWith("show transactions") ||
+                                 lower.startsWith("show metrics");
+
         // ── Already valid SQL ─────────────────────────────────────────────────
         if (lower.startsWith("select ") || lower.startsWith("insert into ") ||
             lower.startsWith("update ")  || lower.startsWith("delete from ") ||
-            lower.startsWith("create table ") || lower.startsWith("create index ")) {
+            lower.startsWith("create table ") || lower.startsWith("create index ") ||
+            lower.startsWith("drop ") || lower.startsWith("use ") ||
+            lower.startsWith("describe ") || lower.startsWith("desc ") ||
+            isExplicitShow) {
             // Uppercase the SQL keyword portion so output is always canonical SQL
             String canonical = cleaned.toUpperCase(Locale.ROOT);
             // But preserve string literals (values in quotes) — simple approach: just uppercase the whole thing
@@ -135,12 +150,27 @@ public final class RuleBasedLlmClient implements LlmClient {
                    mWhere.group(2) + " " + op + " " + quoteIfNeeded(mWhere.group(4)) + ";";
         }
 
+        // "show tables" / "list tables" / "show databases" / "list databases"
+        if (lower.matches("^(?:show|list|get|fetch)(?:\\s+all)?\\s+tables$")) {
+            return "SHOW TABLES;";
+        }
+        if (lower.matches("^(?:show|list|get|fetch)(?:\\s+all)?\\s+databases$")) {
+            return "SHOW DATABASES;";
+        }
+
         // "show all <table>" / "list all <table>" / "get all <table>"
         Matcher mAll = Pattern.compile(
             "^(?:show|list|get|fetch|select)(?:\\s+all)?\\s+(?:from\\s+)?([a-zA-Z0-9_]+)$",
             Pattern.CASE_INSENSITIVE).matcher(cleaned);
         if (mAll.find()) {
-            return "SELECT * FROM " + mAll.group(1) + ";";
+            String tbl = mAll.group(1);
+            if (tbl.equalsIgnoreCase("tables")) {
+                return "SHOW TABLES;";
+            }
+            if (tbl.equalsIgnoreCase("databases")) {
+                return "SHOW DATABASES;";
+            }
+            return "SELECT * FROM " + tbl + ";";
         }
 
         // ── Free-form NL parsing ───────────────────────────────────────────────
@@ -215,7 +245,8 @@ public final class RuleBasedLlmClient implements LlmClient {
         "cheap", "cheaper", "expensive", "pricier", "old", "older",
         "than", "more", "less", "above", "below", "over", "under",
         "greater", "equal", "at", "least", "most", "no",
-        "a", "an", "by", "on", "to", "for", "and", "or"
+        "a", "an", "by", "on", "to", "for", "and", "or",
+        "tables", "databases"
     );
 
     private String extractTableFromFreeText(String lower) {

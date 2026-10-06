@@ -232,6 +232,41 @@ public final class KoraDB implements AutoCloseable {
             trimmed = trimmed.substring(0, trimmed.length() - 1).trim();
         }
 
+        if (trimmed.equalsIgnoreCase("SHOW DATABASES")) {
+            List<String> dbs = session.getCatalog().listDatabases();
+            List<Row> rows = new ArrayList<>();
+            for (String dbName : dbs) {
+                rows.add(new Row(Map.of("database", dbName)));
+            }
+            return QueryResult.select(rows, List.of("database"));
+        }
+        if (trimmed.equalsIgnoreCase("SHOW TABLES")) {
+            var activeDb = session.getCatalog().currentDatabase();
+            if (activeDb.isEmpty()) {
+                throw new dev.koradb.exception.SchemaException("No database selected. Use 'USE <dbname>;' first.");
+            }
+            var database = session.getCatalog().getDatabase(activeDb.get());
+            List<Row> rows = new ArrayList<>();
+            for (var tbl : database.listTables()) {
+                rows.add(new Row(Map.of("table_name", tbl.getName())));
+            }
+            return QueryResult.select(rows, List.of("table_name"));
+        }
+        if (trimmed.toUpperCase().startsWith("DESCRIBE ") || trimmed.toUpperCase().startsWith("DESC ")) {
+            String tableName = trimmed.substring(trimmed.indexOf(' ') + 1).trim();
+            var activeDb = session.getCatalog().currentDatabase();
+            if (activeDb.isEmpty()) {
+                throw new dev.koradb.exception.SchemaException("No database selected. Use 'USE <dbname>;' first.");
+            }
+            var database = session.getCatalog().getDatabase(activeDb.get());
+            var table = database.getTable(tableName);
+            List<Row> rows = new ArrayList<>();
+            for (var col : table.getSchema().columns()) {
+                rows.add(new Row(Map.of("column_name", col.name(), "data_type", col.dataType().name())));
+            }
+            return QueryResult.select(rows, List.of("column_name", "data_type"));
+        }
+
         if (trimmed.equalsIgnoreCase("SHOW BUFFER POOL STATUS")) {
             return getBufferPoolStatus();
         }

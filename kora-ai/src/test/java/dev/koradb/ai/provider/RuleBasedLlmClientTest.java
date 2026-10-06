@@ -72,6 +72,21 @@ class RuleBasedLlmClientTest {
         // Without semicolon — one is added
         assertThat(client.translateTextToSql("SELECT * FROM orders"))
                 .isEqualTo("SELECT * FROM ORDERS;");
+        // SHOW statements
+        assertThat(client.translateTextToSql("SHOW TABLES;"))
+                .isEqualTo("SHOW TABLES;");
+        assertThat(client.translateTextToSql("show tables"))
+                .isEqualTo("SHOW TABLES;");
+        assertThat(client.translateTextToSql("show databases"))
+                .isEqualTo("SHOW DATABASES;");
+        assertThat(client.translateTextToSql("show all tables"))
+                .isEqualTo("SHOW TABLES;");
+        assertThat(client.translateTextToSql("list tables"))
+                .isEqualTo("SHOW TABLES;");
+        assertThat(client.translateTextToSql("show buffer pool status"))
+                .isEqualTo("SHOW BUFFER POOL STATUS;");
+        assertThat(client.translateTextToSql("describe products"))
+                .isEqualTo("DESCRIBE PRODUCTS;");
     }
 
     @Test
