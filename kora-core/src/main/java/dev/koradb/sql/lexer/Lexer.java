@@ -206,13 +206,26 @@ public final class Lexer {
     /**
      * Scans a single-quoted string literal.
      * The produced token's lexeme is the content WITHOUT surrounding quotes.
-     * Escaped single quotes ({@code ''}) are not supported in Milestone 1.
+     * Escaped single quotes ({@code ''}) are properly supported.
      */
     private void scanStringLiteral() {
         int startLine = line;
+        StringBuilder content = new StringBuilder();
 
-        while (!isAtEnd() && peek() != '\'') {
-            if (peek() == '\n') line++;
+        while (!isAtEnd()) {
+            char c = peek();
+            if (c == '\'') {
+                if (peekNext() == '\'') {
+                    content.append('\'');
+                    advance(); // skip first quote
+                    advance(); // skip second quote
+                    continue;
+                } else {
+                    break; // closing quote
+                }
+            }
+            if (c == '\n') line++;
+            content.append(c);
             advance();
         }
 
@@ -223,9 +236,7 @@ public final class Lexer {
         // Consume the closing quote
         advance();
 
-        // Lexeme is the content between the quotes
-        String content = source.substring(start + 1, current - 1);
-        addToken(TokenType.LITERAL_STRING, content);
+        addToken(TokenType.LITERAL_STRING, content.toString());
     }
 
     /**

@@ -129,6 +129,35 @@ mvn clean package -DskipTests
 ./bin/koradb server --port 8765
 ```
 
+### 4. Connect via JDBC (Microservices & Spring Boot)
+
+Java microservices, Spring Boot applications, and connection pools like HikariCP can connect to KoraDB using standard JDBC:
+
+```properties
+# Spring Boot (application.properties)
+spring.datasource.url=jdbc:koradb://localhost:8765/orders_db
+spring.datasource.driver-class-name=dev.koradb.jdbc.KoraDriver
+```
+
+Or using standard Java `DriverManager`:
+
+```java
+import java.sql.*;
+
+try (Connection conn = DriverManager.getConnection("jdbc:koradb://localhost:8765/orders_db");
+     PreparedStatement pstmt = conn.prepareStatement("SELECT * FROM orders WHERE id = ?;")) {
+
+    pstmt.setInt(1, 101);
+    try (ResultSet rs = pstmt.executeQuery()) {
+        while (rs.next()) {
+            System.out.println(rs.getInt("id") + " - " + rs.getString("customer"));
+        }
+    }
+}
+```
+
+---
+
 ### Run All Tests
 
 ```bash

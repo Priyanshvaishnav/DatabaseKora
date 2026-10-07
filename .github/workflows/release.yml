@@ -54,6 +54,7 @@ jobs:
           # Copy runnable fat jars
           cp kora-server/target/koradb-server.jar "$DIST_DIR/lib/"
           cp kora-cli/target/koradb-cli.jar "$DIST_DIR/lib/"
+          cp kora-jdbc/target/koradb-jdbc.jar "$DIST_DIR/lib/" 2>/dev/null || true
           cp benchmarks/target/benchmarks.jar "$DIST_DIR/lib/" 2>/dev/null || true
 
           # Copy docs
@@ -81,6 +82,7 @@ jobs:
             koradb-dist.zip
             koradb-*-all.tar.gz
             koradb-*-all.zip
+            kora-jdbc/target/koradb-jdbc.jar
             SHA256SUMS.txt
 
   publish-docker:
