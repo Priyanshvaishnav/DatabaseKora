@@ -5,6 +5,8 @@ import dev.koradb.catalog.DiskCatalog;
 import dev.koradb.observability.ObservabilityEngine;
 import dev.koradb.observability.exporter.MetricsExporterConfig;
 import dev.koradb.observability.exporter.MetricsHttpServer;
+import dev.koradb.server.http.KoraHttpConfig;
+import dev.koradb.server.http.KoraHttpServer;
 import dev.koradb.replication.master.ReplicationMaster;
 import dev.koradb.replication.master.ReplicationMasterConfig;
 import dev.koradb.replication.model.NodeRole;
@@ -36,6 +38,7 @@ public final class ServerInstance implements AutoCloseable {
     private ReplicationReplica replica;
     private ObservabilityEngine observabilityEngine;
     private MetricsHttpServer metricsServer;
+    private KoraHttpServer httpServer;
     private volatile boolean running = false;
 
     public ServerInstance(ServerBootstrapConfig config) {
@@ -146,6 +149,23 @@ public final class ServerInstance implements AutoCloseable {
             this.server.start();
         }
 
+        // 4. Initialize HTTP REST query server if enabled
+        if (config.httpEnabled()) {
+            try {
+                KoraHttpConfig httpConfig = KoraHttpConfig.of(
+                        config.host(),
+                        config.httpPort(),
+                        config.role() == NodeRole.REPLICA
+                );
+                this.httpServer = new KoraHttpServer(httpConfig, db);
+                this.httpServer.start();
+                log.info("HTTP REST query server running at http://{}:{}/v1/query",
+                        config.host(), httpServer.getPort());
+            } catch (Exception e) {
+                log.warn("Failed to start HTTP query server on port {}: {}", config.httpPort(), e.getMessage());
+            }
+        }
+
         this.running = true;
         log.info("KoraDB node operational on {}:{} (role={})", config.host(), server.getPort(), config.role());
     }
@@ -159,6 +179,14 @@ public final class ServerInstance implements AutoCloseable {
         }
         running = false;
         log.info("Gracefully stopping KoraDB node...");
+
+        if (httpServer != null) {
+            try {
+                httpServer.close();
+            } catch (Exception e) {
+                log.warn("Error stopping HTTP query server: {}", e.getMessage());
+            }
+        }
 
         if (server != null) {
             try {
@@ -234,5 +262,9 @@ public final class ServerInstance implements AutoCloseable {
 
     public MetricsHttpServer getMetricsServer() {
         return metricsServer;
+    }
+
+    public KoraHttpServer getHttpServer() {
+        return httpServer;
     }
 }

@@ -10,6 +10,7 @@ COPY pom.xml ./
 COPY kora-core/pom.xml ./kora-core/
 COPY kora-server/pom.xml ./kora-server/
 COPY kora-cli/pom.xml ./kora-cli/
+COPY kora-jdbc/pom.xml ./kora-jdbc/
 COPY kora-replication/pom.xml ./kora-replication/
 COPY kora-observability/pom.xml ./kora-observability/
 COPY kora-ai/pom.xml ./kora-ai/
@@ -22,6 +23,7 @@ RUN mvn dependency:go-offline -B || true
 COPY kora-core/src ./kora-core/src
 COPY kora-server/src ./kora-server/src
 COPY kora-cli/src ./kora-cli/src
+COPY kora-jdbc/src ./kora-jdbc/src
 COPY kora-replication/src ./kora-replication/src
 COPY kora-observability/src ./kora-observability/src
 COPY kora-ai/src ./kora-ai/src
@@ -72,11 +74,13 @@ ENV KORA_HOST=0.0.0.0 \
     KORA_REPLICATION_PORT=8766 \
     KORA_METRICS_ENABLED=true \
     KORA_METRICS_PORT=9100 \
+    KORA_HTTP_ENABLED=true \
+    KORA_HTTP_PORT=8080 \
     JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -XX:+UseZGC -XX:+ZGenerational"
 
 USER koradb
 
-EXPOSE 8765 8766 9100
+EXPOSE 8765 8766 9100 8080
 
 VOLUME ["/var/lib/koradb/data"]
 

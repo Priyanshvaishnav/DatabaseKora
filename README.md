@@ -129,6 +129,78 @@ mvn clean package -DskipTests
 ./bin/koradb server --port 8765
 ```
 
+### 4. Connect via JDBC (Microservices & Spring Boot)
+
+Java microservices, Spring Boot applications, and connection pools like HikariCP can connect to KoraDB using standard JDBC:
+
+```properties
+# Spring Boot (application.properties)
+spring.datasource.url=jdbc:koradb://localhost:8765/orders_db
+spring.datasource.driver-class-name=dev.koradb.jdbc.KoraDriver
+```
+
+Or using standard Java `DriverManager`:
+
+```java
+import java.sql.*;
+
+try (Connection conn = DriverManager.getConnection("jdbc:koradb://localhost:8765/orders_db");
+     PreparedStatement pstmt = conn.prepareStatement("SELECT * FROM orders WHERE id = ?;")) {
+
+    pstmt.setInt(1, 101);
+    try (ResultSet rs = pstmt.executeQuery()) {
+        while (rs.next()) {
+            System.out.println(rs.getInt("id") + " - " + rs.getString("customer"));
+        }
+    }
+}
+```
+
+### 5. Query via HTTP REST JSON API (Python, Node.js, Go, cURL)
+
+Any microservice, language, or serverless function can query KoraDB over HTTP on port `8080` (`POST /v1/query`) with **zero driver installation**:
+
+#### cURL
+```bash
+# Execute SQL with JSON body
+curl -X POST http://localhost:8080/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"database": "orders_db", "sql": "SELECT * FROM orders WHERE id = 101"}'
+
+# Or execute with raw SQL body
+curl -X POST http://localhost:8080/v1/query?database=orders_db -d "SELECT * FROM orders"
+```
+
+#### Python (`requests` / `httpx`)
+```python
+import requests
+
+resp = requests.post("http://localhost:8080/v1/query", json={
+    "database": "orders_db",
+    "sql": "SELECT id, customer, amount FROM orders WHERE amount > 100"
+})
+data = resp.json()
+print("Columns:", data["columns"])
+for row in data["rows"]:
+    print(row)
+```
+
+#### Node.js / TypeScript (`fetch`)
+```javascript
+const res = await fetch("http://localhost:8080/v1/query", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    database: "orders_db",
+    sql: "SELECT * FROM orders"
+  })
+});
+const data = await res.json();
+console.log(data.rows);
+```
+
+---
+
 ### Run All Tests
 
 ```bash

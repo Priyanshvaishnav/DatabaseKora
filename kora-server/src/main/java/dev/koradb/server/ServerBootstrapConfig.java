@@ -24,7 +24,9 @@ public record ServerBootstrapConfig(
         int primaryPort,
         String replicaId,
         boolean metricsEnabled,
-        int metricsPort
+        int metricsPort,
+        boolean httpEnabled,
+        int httpPort
 ) {
 
     public static final String DEFAULT_HOST = "127.0.0.1";
@@ -32,6 +34,7 @@ public record ServerBootstrapConfig(
     public static final int DEFAULT_PORT = 8765;
     public static final int DEFAULT_REPLICATION_PORT = 8766;
     public static final int DEFAULT_METRICS_PORT = 9100;
+    public static final int DEFAULT_HTTP_PORT = 8080;
 
     public ServerBootstrapConfig {
         Objects.requireNonNull(host, "host must not be null");
@@ -39,6 +42,25 @@ public record ServerBootstrapConfig(
         Objects.requireNonNull(replicationMode, "replicationMode must not be null");
         Objects.requireNonNull(primaryHost, "primaryHost must not be null");
         Objects.requireNonNull(replicaId, "replicaId must not be null");
+    }
+
+    /**
+     * Backward-compatible constructor defaulting HTTP REST API to enabled on port 8080.
+     */
+    public ServerBootstrapConfig(
+            String host,
+            int port,
+            Path dataDir,
+            NodeRole role,
+            int replicationPort,
+            ReplicationMode replicationMode,
+            String primaryHost,
+            int primaryPort,
+            String replicaId,
+            boolean metricsEnabled,
+            int metricsPort
+    ) {
+        this(host, port, dataDir, role, replicationPort, replicationMode, primaryHost, primaryPort, replicaId, metricsEnabled, metricsPort, true, DEFAULT_HTTP_PORT);
     }
 
     /**
@@ -69,6 +91,10 @@ public record ServerBootstrapConfig(
         String metricsEnv = System.getenv("KORA_METRICS_ENABLED");
         boolean metricsEnabled = metricsEnv == null || (!"false".equalsIgnoreCase(metricsEnv) && !"0".equals(metricsEnv));
         int metricsPort = getEnvIntOrDefault("KORA_METRICS_PORT", DEFAULT_METRICS_PORT);
+
+        String httpEnv = System.getenv("KORA_HTTP_ENABLED");
+        boolean httpEnabled = httpEnv == null || (!"false".equalsIgnoreCase(httpEnv) && !"0".equals(httpEnv));
+        int httpPort = getEnvIntOrDefault("KORA_HTTP_PORT", DEFAULT_HTTP_PORT);
 
         // 2. Parse CLI args to override
         if (args != null) {
@@ -109,6 +135,11 @@ public record ServerBootstrapConfig(
                     }
                     case "--no-metrics" -> metricsEnabled = false;
                     case "--metrics" -> metricsEnabled = true;
+                    case "--http-port" -> {
+                        if (++i < args.length) httpPort = Integer.parseInt(args[i]);
+                    }
+                    case "--no-http" -> httpEnabled = false;
+                    case "--http" -> httpEnabled = true;
                     case "--help", "-v", "--version" -> {
                         // Handled by main() caller
                     }
@@ -132,7 +163,9 @@ public record ServerBootstrapConfig(
                 primaryPort,
                 replicaId,
                 metricsEnabled,
-                metricsPort
+                metricsPort,
+                httpEnabled,
+                httpPort
         );
     }
 
