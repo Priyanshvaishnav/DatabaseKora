@@ -45,7 +45,9 @@ class ServerInstanceTest {
                 0,
                 "test-node",
                 true,
-                0 // ephemeral metrics port
+                0, // ephemeral metrics port
+                true,
+                0  // ephemeral HTTP port
         );
 
         instance = new ServerInstance(config);
@@ -54,8 +56,10 @@ class ServerInstanceTest {
         assertThat(instance.isRunning()).isTrue();
         int sqlPort = instance.getServer().getPort();
         int metricsPort = instance.getMetricsServer().getPort();
+        int httpPort = instance.getHttpServer().getPort();
         assertThat(sqlPort).isGreaterThan(0);
         assertThat(metricsPort).isGreaterThan(0);
+        assertThat(httpPort).isGreaterThan(0);
 
         // 1. Test SQL client interaction
         try (KoraClient client = KoraClient.connect("127.0.0.1", sqlPort)) {
@@ -70,8 +74,18 @@ class ServerInstanceTest {
             assertThat(res.rows().get(0).get(1)).isEqualTo("Alice");
         }
 
-        // 2. Test Prometheus /health endpoint
+        // 2. Test HTTP REST query endpoint
         HttpClient httpClient = HttpClient.newHttpClient();
+        HttpRequest httpQueryReq = HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + httpPort + "/v1/query?database=app"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"sql\": \"SELECT * FROM users\"}"))
+                .build();
+        HttpResponse<String> httpQueryRes = httpClient.send(httpQueryReq, HttpResponse.BodyHandlers.ofString());
+        assertThat(httpQueryRes.statusCode()).isEqualTo(200);
+        assertThat(httpQueryRes.body()).contains("\"Alice\"");
+
+        // 3. Test Prometheus /health endpoint
         HttpRequest healthReq = HttpRequest.newBuilder()
                 .uri(URI.create("http://127.0.0.1:" + metricsPort + "/health"))
                 .GET()

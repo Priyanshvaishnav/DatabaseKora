@@ -62,6 +62,11 @@ public final class ServerMain {
                     config.primaryHost(), config.primaryPort(), config.replicaId(), config.replicationMode());
         }
 
+        if (config.httpEnabled() && instance.getHttpServer() != null) {
+            System.out.printf("  HTTP REST API:      http://%s:%d/v1/query | /v1/health%n",
+                    config.host(), instance.getHttpServer().getPort());
+        }
+
         if (config.metricsEnabled() && instance.getMetricsServer() != null) {
             System.out.printf("  Metrics & Health:   http://%s:%d/metrics | /health%n",
                     config.host(), instance.getMetricsServer().getPort());
@@ -90,6 +95,8 @@ public final class ServerMain {
                   --primary-host <HOST>         Primary hostname/IP for replica (env: KORA_PRIMARY_HOST, default: localhost)
                   --primary-port <PORT>         Primary replication port for replica (env: KORA_PRIMARY_PORT, default: 8766)
                   --replica-id <ID>             Replica node identifier (env: KORA_REPLICA_ID, default: hostname)
+                  --http-port <PORT>            HTTP REST API query port (env: KORA_HTTP_PORT, default: 8080)
+                  --no-http                     Disable HTTP REST query server
                   --metrics-port <PORT>         Prometheus metrics and health port (env: KORA_METRICS_PORT, default: 9100)
                   --no-metrics                  Disable HTTP Prometheus exporter and health endpoint
                   -v, --version                 Print version information and exit

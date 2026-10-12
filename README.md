@@ -156,6 +156,49 @@ try (Connection conn = DriverManager.getConnection("jdbc:koradb://localhost:8765
 }
 ```
 
+### 5. Query via HTTP REST JSON API (Python, Node.js, Go, cURL)
+
+Any microservice, language, or serverless function can query KoraDB over HTTP on port `8080` (`POST /v1/query`) with **zero driver installation**:
+
+#### cURL
+```bash
+# Execute SQL with JSON body
+curl -X POST http://localhost:8080/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"database": "orders_db", "sql": "SELECT * FROM orders WHERE id = 101"}'
+
+# Or execute with raw SQL body
+curl -X POST http://localhost:8080/v1/query?database=orders_db -d "SELECT * FROM orders"
+```
+
+#### Python (`requests` / `httpx`)
+```python
+import requests
+
+resp = requests.post("http://localhost:8080/v1/query", json={
+    "database": "orders_db",
+    "sql": "SELECT id, customer, amount FROM orders WHERE amount > 100"
+})
+data = resp.json()
+print("Columns:", data["columns"])
+for row in data["rows"]:
+    print(row)
+```
+
+#### Node.js / TypeScript (`fetch`)
+```javascript
+const res = await fetch("http://localhost:8080/v1/query", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    database: "orders_db",
+    sql: "SELECT * FROM orders"
+  })
+});
+const data = await res.json();
+console.log(data.rows);
+```
+
 ---
 
 ### Run All Tests

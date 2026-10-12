@@ -21,6 +21,8 @@ class ServerBootstrapConfigTest {
         assertThat(config.replicationMode()).isEqualTo(ReplicationMode.ASYNC);
         assertThat(config.metricsEnabled()).isTrue();
         assertThat(config.metricsPort()).isEqualTo(9100);
+        assertThat(config.httpEnabled()).isTrue();
+        assertThat(config.httpPort()).isEqualTo(8080);
     }
 
     @Test
@@ -37,7 +39,9 @@ class ServerBootstrapConfigTest {
                 "--primary-port", "8888",
                 "--replica-id", "replica-k8s-0",
                 "--metrics-port", "9191",
-                "--no-metrics"
+                "--no-metrics",
+                "--http-port", "8088",
+                "--no-http"
         };
 
         ServerBootstrapConfig config = ServerBootstrapConfig.fromEnvAndArgs(args);
@@ -52,6 +56,8 @@ class ServerBootstrapConfigTest {
         assertThat(config.replicaId()).isEqualTo("replica-k8s-0");
         assertThat(config.metricsPort()).isEqualTo(9191);
         assertThat(config.metricsEnabled()).isFalse();
+        assertThat(config.httpPort()).isEqualTo(8088);
+        assertThat(config.httpEnabled()).isFalse();
     }
 
     @Test
