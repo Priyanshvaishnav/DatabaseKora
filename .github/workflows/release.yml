@@ -74,15 +74,17 @@ jobs:
         with:
           tag_name: ${{ github.ref_name || github.event.inputs.tag_name }}
           name: KoraDB ${{ github.ref_name || github.event.inputs.tag_name }}
+          body_path: RELEASE_NOTES_v0.1.0.md
           draft: false
           prerelease: false
-          generate_release_notes: true
           files: |
             koradb-dist.tar.gz
             koradb-dist.zip
             koradb-*-all.tar.gz
             koradb-*-all.zip
             kora-jdbc/target/koradb-jdbc.jar
+            kora-server/target/koradb-server.jar
+            kora-cli/target/koradb-cli.jar
             SHA256SUMS.txt
 
   publish-docker:
