@@ -62,6 +62,25 @@ public class IndexScanOperator implements Operator {
             rids = index.rangeScan(lowKey, highKey, lowInclusive, highInclusive);
         }
         cursor = 0;
+        seen = new java.util.HashSet<>();
+    }
+
+    private java.util.Set<RecordId> seen = new java.util.HashSet<>();
+
+    /** Re-checks the row's current key against the scan bounds (the heap is the source of truth). */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private boolean keyInRange(Object value) {
+        if (value == null) return false;
+        dev.koradb.index.IndexKey k = new dev.koradb.index.IndexKey(value, index.getKeyType());
+        if (lowKey != null) {
+            int c = k.compareTo(lowKey);
+            if (c < 0 || (c == 0 && !lowInclusive)) return false;
+        }
+        if (highKey != null) {
+            int c = k.compareTo(highKey);
+            if (c > 0 || (c == 0 && !highInclusive)) return false;
+        }
+        return true;
     }
 
     @Override
@@ -70,8 +89,9 @@ public class IndexScanOperator implements Operator {
         dev.koradb.mvcc.ReadView rv = dev.koradb.mvcc.MvccContext.getReadView();
         while (cursor < rids.size()) {
             RecordId rid = rids.get(cursor++);
+            if (!seen.add(rid)) continue;                 // an index may hold the same RID twice
             Row raw = tableFile != null ? tableFile.readRow(rid, rv) : null;
-            if (raw != null) {
+            if (raw != null && keyInRange(raw.get(index.getColumnName()))) {   // index entries are hints
                 Map<String, Object> map = new LinkedHashMap<>(raw.values());
                 for (Map.Entry<String, Object> entry : raw.values().entrySet()) {
                     map.put(tableName + "." + entry.getKey(), entry.getValue());

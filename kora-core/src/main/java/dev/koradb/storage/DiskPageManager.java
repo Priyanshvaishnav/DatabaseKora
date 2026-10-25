@@ -69,7 +69,7 @@ public final class DiskPageManager implements AutoCloseable {
      * @return the page with its data populated
      * @throws StorageException if the page does not exist or an I/O error occurs
      */
-    public Page read(int pageId) {
+    public synchronized Page read(int pageId) {
         long offset = StorageConfig.pageOffset(pageId);
         checkPageExists(pageId, offset);
 
@@ -104,7 +104,7 @@ public final class DiskPageManager implements AutoCloseable {
      * @param page the page to write (must have a valid page ID)
      * @throws StorageException if an I/O error occurs
      */
-    public void write(Page page) {
+    public synchronized void write(Page page) {
         long offset = StorageConfig.pageOffset(page.getPageId());
         try {
             file.seek(offset);
@@ -127,7 +127,7 @@ public final class DiskPageManager implements AutoCloseable {
      * @return the newly allocated and initialised {@link Page}
      * @throws StorageException if an I/O error occurs
      */
-    public Page allocatePage() {
+    public synchronized Page allocatePage() {
         int newPageId = pageCount();
         Page page     = new Page(newPageId);
 
@@ -150,7 +150,7 @@ public final class DiskPageManager implements AutoCloseable {
      *
      * @throws StorageException if an I/O error occurs
      */
-    public int pageCount() {
+    public synchronized int pageCount() {
         try {
             long length = file.length();
             return (int)(length / StorageConfig.PAGE_SIZE);
@@ -163,7 +163,7 @@ public final class DiskPageManager implements AutoCloseable {
      * Forces all pending writes to durable storage (fsync).
      * Called by the WAL in Milestone 8 before acknowledging a commit.
      */
-    public void flush() {
+    public synchronized void flush() {
         try {
             file.getFD().sync();
         } catch (IOException e) {
@@ -176,7 +176,7 @@ public final class DiskPageManager implements AutoCloseable {
     // =========================================================================
 
     @Override
-    public void close() {
+    public synchronized void close() {
         try {
             file.close();
             log.debug("Closed table file: {}", filePath);

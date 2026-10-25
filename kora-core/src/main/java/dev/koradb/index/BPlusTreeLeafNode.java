@@ -87,33 +87,18 @@ public final class BPlusTreeLeafNode {
      * Returns true if an entry was removed.
      */
     public boolean delete(IndexKey key, RecordId rid) {
-        int idx = binarySearch(key);
-        if (idx < 0) return false;
-
-        if (rid == null) {
-            keys.remove(idx);
-            values.remove(idx);
-            return true;
+        // Lower bound: first entry >= key (binarySearch may land on any of several duplicates)
+        int lo = 0, hi = keys.size();
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (keys.get(mid).compareTo(key) < 0) lo = mid + 1; else hi = mid;
         }
-
-        // Handle duplicates or exact rid match
-        int i = idx;
-        while (i < keys.size() && keys.get(i).compareTo(key) == 0) {
-            if (values.get(i).equals(rid)) {
+        for (int i = lo; i < keys.size() && keys.get(i).compareTo(key) == 0; i++) {
+            if (rid == null || values.get(i).equals(rid)) {
                 keys.remove(i);
                 values.remove(i);
                 return true;
             }
-            i++;
-        }
-        i = idx - 1;
-        while (i >= 0 && keys.get(i).compareTo(key) == 0) {
-            if (values.get(i).equals(rid)) {
-                keys.remove(i);
-                values.remove(i);
-                return true;
-            }
-            i--;
         }
         return false;
     }

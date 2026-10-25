@@ -35,6 +35,14 @@ public interface Index extends AutoCloseable {
     void insert(IndexKey key, RecordId rid);
 
     /**
+     * Inserts an entry without enforcing uniqueness. The executor calls this after doing its
+     * own MVCC-aware duplicate check (entries pointing at dead row versions are not duplicates).
+     */
+    default void insertUnchecked(IndexKey key, RecordId rid) {
+        insert(key, rid);
+    }
+
+    /**
      * Finds a single matching RecordId for the given key.
      */
     Optional<RecordId> search(IndexKey key);

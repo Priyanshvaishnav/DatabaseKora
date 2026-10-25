@@ -24,6 +24,11 @@ public final class ServerMain {
             }
         }
 
+        for (int i = 0; i + 1 < args.length; i++) {
+            if ("--replication-db".equals(args[i])) {
+                System.setProperty("kora.replication.db", args[i + 1]);
+            }
+        }
         ServerBootstrapConfig config = ServerBootstrapConfig.fromEnvAndArgs(args);
         ServerInstance instance = new ServerInstance(config);
 
@@ -92,6 +97,7 @@ public final class ServerMain {
                   --role <ROLE>                 Cluster role: PRIMARY, REPLICA, or STANDALONE (env: KORA_ROLE, default: PRIMARY)
                   --replication-port <PORT>     Replication master port on primary (env: KORA_REPLICATION_PORT, default: 8766)
                   --replication-mode <MODE>     Replication mode: ASYNC or SYNC (env: KORA_REPLICATION_MODE, default: ASYNC)
+                  --replication-db <NAME>       Database streamed to replicas by a PRIMARY with a data dir (env: KORA_REPLICATION_DB, default: default)
                   --primary-host <HOST>         Primary hostname/IP for replica (env: KORA_PRIMARY_HOST, default: localhost)
                   --primary-port <PORT>         Primary replication port for replica (env: KORA_PRIMARY_PORT, default: 8766)
                   --replica-id <ID>             Replica node identifier (env: KORA_REPLICA_ID, default: hostname)

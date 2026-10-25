@@ -24,6 +24,7 @@ public class TransactionManager {
     private final AtomicLong nextTxnId = new AtomicLong(1L);
     private volatile long initialTxnId = 1L;
     private final ConcurrentMap<TransactionId, Transaction> activeTransactions = new ConcurrentHashMap<>();
+    private final Object snapshotLock = new Object();
     private final ConcurrentMap<Long, Boolean> committedTxnIds = new ConcurrentHashMap<>();
     private final ConcurrentMap<Long, Boolean> abortedTxnIds = new ConcurrentHashMap<>();
     private final LockManager lockManager;
@@ -65,15 +66,55 @@ public class TransactionManager {
     /**
      * Begins a new transaction with the specified isolation level.
      */
-    public Transaction beginTransaction(IsolationLevel isolationLevel) {
-        TransactionId id = new TransactionId(nextTxnId.getAndIncrement());
-        Transaction txn = new Transaction(id, isolationLevel);
-        dev.koradb.storage.wal.LogManager lm = activeLogManager();
-        if (lm != null) {
-            long lsn = lm.appendBegin(id.value(), 0L);
-            txn.setPrevLsn(lsn);
+    // ---- transaction-id reservation (ids are never reused across restarts) ----
+    private volatile java.util.function.LongConsumer txnIdReserver = null;
+    private volatile long reservedUpTo = Long.MAX_VALUE;
+    private long reservationBlock = 1000L;
+
+    /**
+     * Installs a callback that durably records "ids below N may have been used". It is invoked
+     * before an id at or beyond the current reservation is handed out.
+     */
+    public synchronized void setTxnIdReserver(java.util.function.LongConsumer reserver, long block) {
+        this.txnIdReserver = reserver;
+        this.reservationBlock = Math.max(1L, block);
+        long limit = nextTxnId.get() + reservationBlock;
+        reserver.accept(limit);
+        this.reservedUpTo = limit;
+    }
+
+    private void ensureReserved(long id) {
+        if (id < reservedUpTo) return;
+        synchronized (this) {
+            if (id >= reservedUpTo && txnIdReserver != null) {
+                long limit = Math.max(id, nextTxnId.get()) + reservationBlock;
+                txnIdReserver.accept(limit);
+                reservedUpTo = limit;
+            }
         }
-        activeTransactions.put(id, txn);
+    }
+
+    public Transaction beginTransaction(IsolationLevel isolationLevel) {
+        TransactionId id;
+        Transaction txn;
+        // Allocating the id and registering the txn as active must be atomic with respect to
+        // createReadView(): a snapshot taken in between would see an id below its high watermark
+        // that is neither active nor committed, and could treat its uncommitted writes as visible.
+        synchronized (snapshotLock) {
+            id = new TransactionId(nextTxnId.getAndIncrement());
+            txn = new Transaction(id, isolationLevel);
+            activeTransactions.put(id, txn);
+        }
+        ensureReserved(id.value());
+        txn.setAbortedCheck(this::isAborted);
+        // With a catalog, BEGIN is written lazily into the WAL of the database the transaction
+        // first modifies (Transaction.bindWal). An explicitly supplied LogManager (no catalog)
+        // keeps the old eager behaviour.
+        if (catalog == null && this.logManager != null) {
+            long lsn = this.logManager.appendBegin(id.value(), 0L);
+            txn.setPrevLsn(lsn);
+            txn.presetWal(this.logManager);
+        }
         log.debug("Started transaction {} with isolation {}", id, isolationLevel);
         return txn;
     }
@@ -105,14 +146,16 @@ public class TransactionManager {
 
         log.debug("Committing transaction {}", txn.getId());
         long commitLsn = 0L;
-        dev.koradb.storage.wal.LogManager lm = activeLogManager();
+        dev.koradb.storage.wal.LogManager lm = txn.getBoundLogManager();   // null = wrote nothing
         if (lm != null) {
             commitLsn = lm.appendCommit(txn.getId().value(), txn.getPrevLsn());
             txn.setPrevLsn(commitLsn);
             lm.flush(commitLsn);
         }
 
-        if (commitHook != null && commitLsn > 0L) {
+        // The commit hook (sync replication) tracks the WAL of the catalog's default database only;
+        // LSNs of another database's WAL are a different sequence and must not be waited on.
+        if (commitHook != null && commitLsn > 0L && (catalog == null || catalog.getLogManager() == null || lm == catalog.getLogManager())) {
             commitHook.onCommit(commitLsn);
         }
 
@@ -144,31 +187,39 @@ public class TransactionManager {
             throw new IllegalStateException("Cannot abort already committed transaction: " + txn.getId());
         }
 
-        log.debug("Aborting transaction {} (applying undo actions)", txn.getId());
+        log.debug("Aborting transaction {}", txn.getId());
         txn.markAborted();
-        boolean hadUndo = txn.hasUndoActions();
-        if (hadUndo) {
-            abortedTxnIds.put(txn.getId().value(), Boolean.TRUE);
-        }
 
         try {
-            while (txn.hasUndoActions()) {
-                UndoAction action = txn.popUndoAction();
-                if (action != null && targetCatalog != null) {
-                    try {
-                        action.undo(targetCatalog);
-                    } catch (Exception e) {
-                        log.error("Error executing undo action in transaction {}", txn.getId(), e);
+            dev.koradb.storage.wal.LogManager lm = txn.getBoundLogManager();
+            if (lm != null && !txn.getTouchedTables().isEmpty()) {
+                // Disk tables: ARIES-style rollback from the WAL (before-images + CLRs + END).
+                rollbackFromWal(txn, lm);
+                txn.clearUndoActions();
+            } else {
+                // In-memory tables (or tables without a WAL): logical undo actions.
+                while (txn.hasUndoActions()) {
+                    UndoAction action = txn.popUndoAction();
+                    if (action != null && targetCatalog != null) {
+                        try {
+                            action.undo(targetCatalog);
+                        } catch (Exception e) {
+                            log.error("Error executing undo action in transaction {}", txn.getId(), e);
+                            throw new IllegalStateException("Rollback of transaction " + txn.getId() + " failed: " + e.getMessage(), e);
+                        }
                     }
                 }
-            }
-            dev.koradb.storage.wal.LogManager lm = activeLogManager();
-            if (lm != null && (hadUndo || txn.getPrevLsn() > 0)) {
-                long abortLsn = lm.appendAbort(txn.getId().value(), txn.getPrevLsn());
-                txn.setPrevLsn(abortLsn);
-                lm.flush(abortLsn);
+                if (lm != null && txn.getPrevLsn() > 0) {
+                    long abortLsn = lm.appendAbort(txn.getId().value(), txn.getPrevLsn());
+                    txn.setPrevLsn(abortLsn);
+                    lm.flush(abortLsn);
+                }
             }
         } finally {
+            // Publish the abort only AFTER every change is undone (finally runs after the rollback).
+            // While rollback runs, this txn's xmax must keep blocking other writers; otherwise a writer
+            // could stamp a row the rollback is about to restore, resurrecting a second live version.
+            abortedTxnIds.put(txn.getId().value(), Boolean.TRUE);
             lockManager.releaseAll(txn.getId());
             activeTransactions.remove(txn.getId());
         }
@@ -221,12 +272,16 @@ public class TransactionManager {
 
     public dev.koradb.mvcc.ReadView createReadView(Transaction txn) {
         long creatorId = txn != null ? txn.getId().value() : 0L;
-        java.util.Set<Long> activeIds = activeTransactions.keySet().stream()
-                .map(TransactionId::value)
-                .filter(id -> id != creatorId)
-                .collect(java.util.stream.Collectors.toSet());
-        long lowWatermark = activeIds.isEmpty() ? nextTxnId.get() : activeIds.stream().min(Long::compareTo).get();
-        long highWatermark = nextTxnId.get();
+        java.util.Set<Long> activeIds;
+        long highWatermark;
+        synchronized (snapshotLock) {   // see beginTransaction(): no half-registered txn can be observed
+            highWatermark = nextTxnId.get();
+            activeIds = activeTransactions.keySet().stream()
+                    .map(TransactionId::value)
+                    .filter(id -> id != creatorId)
+                    .collect(java.util.stream.Collectors.toSet());
+        }
+        long lowWatermark = activeIds.isEmpty() ? highWatermark : activeIds.stream().min(Long::compareTo).get();
         return new dev.koradb.mvcc.ReadView(creatorId, lowWatermark, highWatermark, activeIds, this::isCommitted, this::isAborted);
     }
 
@@ -253,4 +308,45 @@ public class TransactionManager {
     public int activeTransactionCount() {
         return activeTransactions.size();
     }
+
+    /**
+     * Undoes every change of {@code txn} by walking its prevLsn chain backwards through its WAL,
+     * restoring before-images and writing compensation records, then ABORT/END so recovery never
+     * undoes it a second time.
+     */
+    private void rollbackFromWal(Transaction txn, dev.koradb.storage.wal.LogManager lm) {
+        long txnId = txn.getId().value();
+        long abortLsn = lm.appendAbort(txnId, txn.getPrevLsn());
+        long chainLsn = txn.getPrevLsn();      // last data record before the ABORT
+        txn.setPrevLsn(abortLsn);
+        lm.flush(abortLsn);                    // records must be on disk to be read back
+        try (dev.koradb.storage.wal.WalReader reader = new dev.koradb.storage.wal.WalReader(lm.getWalPath())) {
+            long lsn = chainLsn;
+            while (lsn > 0) {
+                dev.koradb.storage.wal.LogRecord rec = reader.readAt(lsn);
+                if (rec.getTxnId() != txnId) {
+                    throw new IllegalStateException("WAL chain of txn " + txnId + " reached a record of txn " + rec.getTxnId() + " at LSN " + lsn);
+                }
+                if (rec instanceof dev.koradb.storage.wal.UpdateLogRecord u) {
+                    dev.koradb.storage.TableFile tf = txn.getTouchedTable(u.getTableName());
+                    if (tf == null) {
+                        throw new IllegalStateException("Table '" + u.getTableName() + "' of txn " + txnId + " is not open");
+                    }
+                    long clr = tf.undoLogged(u, txnId, txn.getPrevLsn());
+                    txn.setPrevLsn(clr);
+                    lsn = u.getPrevLsn();
+                } else if (rec instanceof dev.koradb.storage.wal.ClrLogRecord c) {
+                    lsn = c.getUndoNextLsn();
+                } else {
+                    lsn = rec instanceof dev.koradb.storage.wal.BeginLogRecord ? 0 : rec.getPrevLsn();
+                }
+            }
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("Cannot read WAL to roll back txn " + txnId, e);
+        }
+        long endLsn = lm.appendEnd(txnId, txn.getPrevLsn());
+        txn.setPrevLsn(endLsn);
+        lm.flush(endLsn);
+    }
+
 }

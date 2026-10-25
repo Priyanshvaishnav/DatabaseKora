@@ -69,8 +69,8 @@ public final class ServerInstance implements AutoCloseable {
         if (config.metricsEnabled()) {
             this.observabilityEngine = ObservabilityEngine.getInstance();
             if (db.getCatalog() instanceof DiskCatalog dc) {
-                observabilityEngine.bindLogManager(dc::getLogManager);
-                observabilityEngine.bindBufferPools(() -> dc.getOpenTableFiles().stream()
+                observabilityEngine.bindLogManagers(dc::getAllLogManagers);
+                observabilityEngine.bindBufferPools(() -> dc.getAllOpenTableFiles().stream()
                         .map(tf -> tf.getBufferPool().getStats())
                         .toList());
             }
@@ -106,6 +106,16 @@ public final class ServerInstance implements AutoCloseable {
                     return files;
                 };
 
+                // The replication stream carries ONE database's WAL. Open it before attaching the
+                // master (its LogManager only exists once the database is open), creating it on a
+                // fresh data directory.
+                String replDb = replicationDatabase();
+                if (!dc.listDatabases().contains(replDb)) {
+                    dc.createDatabase(replDb);
+                    log.info("Created replicated database '{}'", replDb);
+                }
+                dc.useDatabase(replDb);
+
                 ReplicationMasterConfig masterConfig = new ReplicationMasterConfig(
                         config.host(),
                         config.replicationPort(),
@@ -118,8 +128,8 @@ public final class ServerInstance implements AutoCloseable {
                 this.master = new ReplicationMaster(masterConfig, dc.getLogManager(), snapshotSupplier);
                 this.master.attachTo(db);
                 this.master.start();
-                log.info("Replication master started on {}:{} ({})",
-                        config.host(), config.replicationPort(), config.replicationMode());
+                log.info("Replication master started on {}:{} ({}), replicating database '{}'",
+                        config.host(), config.replicationPort(), config.replicationMode(), replDb);
             }
 
             KoraServerConfig serverConfig = new KoraServerConfig(config.host(), config.port(), 128, config.dataDir(), false);
@@ -127,6 +137,15 @@ public final class ServerInstance implements AutoCloseable {
             this.server.start();
 
         } else if (config.role() == NodeRole.REPLICA) {
+            // Mirror the primary: the replicated database must exist and be selected so that
+            // streamed WAL records are applied to it.
+            if (db.getCatalog() instanceof DiskCatalog dc) {
+                String replDb = replicationDatabase();
+                if (!dc.listDatabases().contains(replDb)) {
+                    dc.createDatabase(replDb);
+                }
+                dc.useDatabase(replDb);
+            }
             ReplicationReplicaConfig replicaConfig = ReplicationReplicaConfig.of(
                     config.replicaId(),
                     config.primaryHost(),
@@ -267,4 +286,16 @@ public final class ServerInstance implements AutoCloseable {
     public KoraHttpServer getHttpServer() {
         return httpServer;
     }
+
+    /**
+     * Name of the database whose WAL a PRIMARY streams to replicas: system property
+     * {@code kora.replication.db} (set by {@code --replication-db}), else env {@code KORA_REPLICATION_DB},
+     * else {@code "default"}.
+     */
+    static String replicationDatabase() {
+        String v = System.getProperty("kora.replication.db");
+        if (v == null || v.isBlank()) v = System.getenv("KORA_REPLICATION_DB");
+        return (v == null || v.isBlank()) ? "default" : v.trim().toLowerCase();
+    }
+
 }

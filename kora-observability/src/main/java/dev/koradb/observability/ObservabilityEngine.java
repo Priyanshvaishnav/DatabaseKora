@@ -128,6 +128,12 @@ public final class ObservabilityEngine implements AutoCloseable {
         return this.walCollector;
     }
 
+    /** Binds WAL metrics to every open database's WAL (one WAL per database). */
+    public synchronized WalMetricsCollector bindLogManagers(Supplier<java.util.Collection<LogManager>> supplier) {
+        this.walCollector = WalMetricsCollector.forAll(metricsRegistry, supplier);
+        return this.walCollector;
+    }
+
     public synchronized WalMetricsCollector bindLogManager(Supplier<LogManager> supplier) {
         this.walCollector = new WalMetricsCollector(metricsRegistry, supplier);
         return this.walCollector;

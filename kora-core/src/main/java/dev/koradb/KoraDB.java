@@ -106,7 +106,14 @@ public final class KoraDB implements AutoCloseable {
     /**
      * Creates a new isolated client session for concurrent multi-transaction execution.
      */
+    /**
+     * Creates an independent session. For disk-backed instances each session gets its own catalog
+     * view, so {@code USE} in one session never affects another (client connections, HTTP requests).
+     */
     public dev.koradb.session.Session createSession() {
+        if (catalog instanceof DiskCatalog diskCatalog) {
+            return new dev.koradb.session.Session(diskCatalog.sessionView());
+        }
         return new dev.koradb.session.Session(catalog);
     }
 
@@ -292,7 +299,7 @@ public final class KoraDB implements AutoCloseable {
         long dirtyEvictions = 0L;
 
         if (catalog instanceof dev.koradb.catalog.DiskCatalog diskCatalog) {
-            for (dev.koradb.storage.TableFile tf : diskCatalog.getOpenTableFiles()) {
+            for (dev.koradb.storage.TableFile tf : diskCatalog.getAllOpenTableFiles()) {
                 if (tf != null && tf.getBufferPool() != null) {
                     dev.koradb.buffer.BufferPoolStats stats = tf.getBufferPool().getStats();
                     if (stats != null) {
