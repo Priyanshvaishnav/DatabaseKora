@@ -21,6 +21,16 @@ public class UpdateUndoAction implements UndoAction {
     private final Row newRow;
     private final RecordId newRecordId;
 
+    private RecordId oldRecordId;
+    private long txnId;
+
+    /** Disk-table variant that can also clear the xmax stamped on the old version. */
+    public UpdateUndoAction(String tableName, Row oldRow, Row newRow, RecordId oldRecordId, RecordId newRecordId, long txnId) {
+        this(tableName, oldRow, newRow, newRecordId);
+        this.oldRecordId = oldRecordId;
+        this.txnId = txnId;
+    }
+
     public UpdateUndoAction(String tableName, Row oldRow, Row newRow, RecordId newRecordId) {
         this.tableName = Objects.requireNonNull(tableName, "tableName must not be null");
         this.oldRow = Objects.requireNonNull(oldRow, "oldRow must not be null");
@@ -39,6 +49,9 @@ public class UpdateUndoAction implements UndoAction {
         if (table instanceof DiskTable dt && newRecordId != null) {
             // Delete the updated version from disk and index
             dt.getTableFile().deleteRow(newRecordId);
+            if (oldRecordId != null) {
+                dt.getTableFile().clearXmax(oldRecordId, txnId);
+            }
             for (Index idx : catalog.getIndexesForTable(tableName)) {
                 Object newVal = newRow.get(idx.getColumnName());
                 if (newVal != null) {

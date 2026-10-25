@@ -15,7 +15,9 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -24,45 +26,58 @@ import java.util.stream.Collectors;
  * <h2>Directory structure</h2>
  * <pre>
  * dataDir/
+ *   _txnid.hwm          ← transaction-id high-water mark (ids are never reused across restarts)
  *   mydb/
  *     catalog.meta      ← table schemas (plain text, one TABLE line per table)
+ *     kora.wal          ← this database's write-ahead log
  *     users.kdb         ← table data pages
- *     orders.kdb
- *   otherdb/
- *     catalog.meta
- *     ...
+ *     idx_users_id.idx  ← B+ tree index pages
  * </pre>
  *
  * <h2>catalog.meta format</h2>
  * <pre>
  * TABLE users id:INT name:VARCHAR age:INT active:BOOLEAN salary:DOUBLE
- * TABLE orders id:INT user_id:INT total:DOUBLE
+ * INDEX idx_users_id users id false
  * </pre>
  *
- * <p>One line per table. Each column is {@code name:TYPE}. Human-readable
- * and inspectable with any text editor.
- *
- * <h2>Session state</h2>
- * <p>The current database is tracked in memory (not persisted). It is
- * re-established via {@link #useDatabase} after every restart.
+ * <h2>Databases and sessions</h2>
+ * <p>The catalog is shared by every session of a {@link dev.koradb.KoraDB} instance. Each database
+ * is opened lazily on first use (running crash recovery exactly once per process) and then stays
+ * open: its table files, indexes and WAL are never closed by another session's {@code USE}.
+ * Which database a statement runs against is per session: the catalog itself keeps a "default"
+ * current database for embedded use, and {@link #sessionView()} returns an independent
+ * {@link Catalog} view with its own current database for each client connection.
  *
  * <h2>Thread safety</h2>
- * <p>Not thread-safe in M2. Per-connection sessions will be introduced in M11.
+ * <p>Opening, creating and dropping databases, tables and indexes is serialized on this object.
+ * Row-level concurrency is handled by {@link TableFile} (per-table latch), the buffer pool and
+ * the B+ tree (both synchronized).
  */
 public final class DiskCatalog implements Catalog, AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(DiskCatalog.class);
+    private static final String TXN_HWM_FILE = "_txnid.hwm";
+    private static final long TXN_ID_RESERVATION = 1000L;
+
+    /** Runtime state of one open database. */
+    private static final class OpenDb {
+        final String name;                                   // lowercase key
+        final Path dir;
+        final dev.koradb.storage.wal.LogManager logManager;
+        final Map<String, TableFile> files = new ConcurrentHashMap<>();
+        final Map<String, dev.koradb.index.BPlusTree> indexes = new ConcurrentHashMap<>();
+
+        OpenDb(String name, Path dir, dev.koradb.storage.wal.LogManager logManager) {
+            this.name = name;
+            this.dir = dir;
+            this.logManager = logManager;
+        }
+    }
 
     private final Path dataDir;
-
-    /** Cache of open TableFile handles — one per table in the current database. */
-    private final Map<String, TableFile> openFiles = new LinkedHashMap<>();
-
-    /** Cache of open B+ Tree index handles — one per index in the current database. */
-    private final Map<String, dev.koradb.index.BPlusTree> openIndexes = new LinkedHashMap<>();
-
-    private String currentDbName = null; // lowercase key
-    private dev.koradb.storage.wal.LogManager logManager = null;
+    private final Map<String, OpenDb> openDbs = new ConcurrentHashMap<>();
+    /** Current database of the default (embedded) view; client sessions use their own view. */
+    private volatile String currentDbName = null; // lowercase key
     private dev.koradb.transaction.TransactionManager transactionManager = null;
     private volatile boolean suppressWalLogging = false;
 
@@ -74,28 +89,26 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         return suppressWalLogging;
     }
 
-    public void setTransactionManager(dev.koradb.transaction.TransactionManager transactionManager) {
+    public synchronized void setTransactionManager(dev.koradb.transaction.TransactionManager transactionManager) {
         this.transactionManager = transactionManager;
+        initTxnIdHighWaterMark();
         syncTransactionManager();
     }
 
+    /** Raises the next transaction id above every id stored in the open table files. */
     public void syncTransactionManager() {
         if (transactionManager == null) return;
         long max = 0L;
-        for (TableFile tf : openFiles.values()) {
-            max = Math.max(max, tf.getMaxTxnId());
+        for (OpenDb db : openDbs.values()) {
+            for (TableFile tf : db.files.values()) {
+                max = Math.max(max, tf.getMaxTxnId());
+            }
         }
         if (max > 0) {
             transactionManager.initNextTxnId(max + 100);
         }
     }
 
-    /**
-     * Creates a DiskCatalog rooted at the given data directory.
-     * The directory is created if it does not exist.
-     *
-     * @param dataDir root data directory (e.g., {@code Path.of("data")})
-     */
     public DiskCatalog(Path dataDir) {
         this.dataDir = dataDir;
         try {
@@ -106,19 +119,85 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         log.debug("DiskCatalog initialised at: {}", dataDir);
     }
 
+    /**
+     * A per-session view of this catalog with its own current database. The new session starts in
+     * the default view's current database (if any); a later USE in either one is independent.
+     */
+    public Catalog sessionView() {
+        return new SessionCatalog(this, currentDbName);
+    }
+
+    // =========================================================================
+    // Transaction-id high-water mark
+    // =========================================================================
+
+    /**
+     * Transaction ids are global to the KoraDB instance but stored per database. To guarantee an id
+     * is never reused across restarts (whatever database is opened first), ids are reserved in blocks
+     * and the end of the reserved block is persisted before any id in it is handed out.
+     */
+    private void initTxnIdHighWaterMark() {
+        if (transactionManager == null) return;
+        Path hwm = dataDir.resolve(TXN_HWM_FILE);
+        long start = 0L;
+        try {
+            if (Files.exists(hwm)) {
+                start = Long.parseLong(Files.readString(hwm, StandardCharsets.UTF_8).trim());
+            } else {
+                // First start with this data dir (or upgraded from an older version): scan once.
+                start = scanMaxTxnIdOfAllDatabases() + 100;
+            }
+        } catch (IOException | NumberFormatException e) {
+            log.warn("Cannot read {} ({}); scanning databases for the highest transaction id", hwm, e.getMessage());
+            start = scanMaxTxnIdOfAllDatabases() + 100;
+        }
+        if (start > 0) {
+            transactionManager.initNextTxnId(start);
+        }
+        transactionManager.setTxnIdReserver(this::persistTxnIdReservation, TXN_ID_RESERVATION);
+    }
+
+    private void persistTxnIdReservation(long reservedUpTo) {
+        Path hwm = dataDir.resolve(TXN_HWM_FILE);
+        Path tmp = dataDir.resolve(TXN_HWM_FILE + ".tmp");
+        try {
+            Files.writeString(tmp, Long.toString(reservedUpTo), StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.SYNC);
+            Files.move(tmp, hwm, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException e) {
+            throw new StorageException("Cannot persist transaction id reservation in " + hwm, e);
+        }
+    }
+
+    private long scanMaxTxnIdOfAllDatabases() {
+        long max = 0L;
+        for (String db : listDatabases()) {
+            Path dir = dbDir(db);
+            for (Table t : loadTablesMeta(dir)) {
+                Path fp = StorageConfig.tableFilePath(dir, t.getName());
+                if (!Files.exists(fp)) continue;
+                try (TableFile tf = new TableFile(t.getSchema(), fp)) {
+                    max = Math.max(max, tf.getMaxTxnId());
+                } catch (Exception e) {
+                    log.warn("Cannot scan {} for transaction ids: {}", fp, e.getMessage());
+                }
+            }
+        }
+        return max;
+    }
+
     // =========================================================================
     // Database management
     // =========================================================================
 
     @Override
-    public void createDatabase(String name) {
+    public synchronized void createDatabase(String name) {
         Path dbDir = dbDir(name);
         if (Files.exists(dbDir)) {
             throw new SchemaException("Database '%s' already exists".formatted(name));
         }
         try {
             Files.createDirectories(dbDir);
-            // Create empty catalog.meta
             Files.writeString(metaFile(dbDir), "", StandardCharsets.UTF_8);
         } catch (IOException e) {
             throw new StorageException("Cannot create database directory: " + dbDir, e);
@@ -127,19 +206,15 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     }
 
     @Override
-    public void dropDatabase(String name) {
+    public synchronized void dropDatabase(String name) {
         Path dbDir = dbDir(name);
         requireDbDir(name, dbDir);
+        OpenDb db = openDbs.remove(name.toLowerCase());
+        if (db != null) {
+            closeDb(db);
+        }
         if (name.equalsIgnoreCase(currentDbName)) {
-            closeOpenIndexes();
-            closeOpenFiles();
-            if (logManager != null) {
-                logManager.close();
-                logManager = null;
-            }
             currentDbName = null;
-        } else {
-            closeOpenFiles();
         }
         try {
             deleteDirectory(dbDir);
@@ -153,7 +228,6 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     public Database getDatabase(String name) {
         Path dbDir = dbDir(name);
         requireDbDir(name, dbDir);
-        // Reconstruct a Database object from disk
         Database db = new Database(name);
         loadTablesMeta(dbDir).forEach(db::addTable);
         return db;
@@ -163,46 +237,65 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     public List<String> listDatabases() {
         try {
             if (!Files.exists(dataDir)) return List.of();
-            return Files.list(dataDir)
-                    .filter(Files::isDirectory)
-                    .map(p -> p.getFileName().toString())
-                    .sorted()
-                    .toList();
+            try (var stream = Files.list(dataDir)) {
+                return stream
+                        .filter(Files::isDirectory)
+                        .map(p -> p.getFileName().toString())
+                        .sorted()
+                        .toList();
+            }
         } catch (IOException e) {
             throw new StorageException("Cannot list databases", e);
         }
     }
 
     // =========================================================================
-    // Session state
+    // Session state (default view)
     // =========================================================================
 
+    /**
+     * Selects the default view's current database, opening it if needed. Unlike earlier versions this
+     * never closes anything: other sessions may be using other (or the same) databases concurrently.
+     */
     @Override
     public void useDatabase(String name) {
+        openDatabase(name);
+        currentDbName = name.toLowerCase();
+        log.debug("Using database '{}'", name);
+    }
+
+    @Override
+    public Optional<String> currentDatabase() {
+        return Optional.ofNullable(currentDbName);
+    }
+
+    @Override
+    public Database requireCurrentDatabase() {
+        return getDatabase(requireName(currentDbName));
+    }
+
+    /**
+     * Opens a database (once per process): opens its WAL and table files, runs ARIES crash recovery
+     * if the WAL needs it, and loads its indexes (rebuilding them when recovery changed pages).
+     */
+    synchronized void openDatabase(String name) {
+        String key = name.toLowerCase();
+        if (openDbs.containsKey(key)) return;
         Path dbDir = dbDir(name);
         requireDbDir(name, dbDir);
-        closeOpenIndexes();
-        closeOpenFiles();
-        if (logManager != null) {
-            logManager.close();
-            logManager = null;
-        }
-        currentDbName = name.toLowerCase();
+
         Path walPath = StorageConfig.walFilePath(dbDir);
-        this.logManager = new dev.koradb.storage.wal.LogManager(walPath);
-        // Pre-open TableFile handles for all existing tables
+        OpenDb db = new OpenDb(key, dbDir, new dev.koradb.storage.wal.LogManager(walPath));
         loadTablesMeta(dbDir).forEach(table -> {
             Path filePath = StorageConfig.tableFilePath(dbDir, table.getName());
-            BufferPool bp = new BufferPool(new DiskPageManager(filePath), logManager);
-            openFiles.put(table.getName().toLowerCase(),
-                          new TableFile(table.getSchema(), filePath, bp));
+            BufferPool bp = new BufferPool(new DiskPageManager(filePath), db.logManager);
+            db.files.put(table.getName().toLowerCase(), new TableFile(table.getSchema(), filePath, bp));
         });
 
-        // Run ARIES Crash Recovery if WAL contains records
         boolean recovered = false;
         long walMaxTxnId = 0L;
         dev.koradb.storage.recovery.RecoveryManager recoveryManager =
-                new dev.koradb.storage.recovery.RecoveryManager(walPath, logManager, openFiles::get, openFiles::values);
+                new dev.koradb.storage.recovery.RecoveryManager(walPath, db.logManager, db.files::get, db.files::values);
         if (recoveryManager.needsRecovery()) {
             dev.koradb.storage.recovery.RecoveryResult recoveryResult = recoveryManager.recover();
             if (recoveryResult.hasRecoveredChanges()) {
@@ -222,77 +315,69 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         }
 
         long max = walMaxTxnId;
-        for (TableFile tf : openFiles.values()) {
+        for (TableFile tf : db.files.values()) {
             max = Math.max(max, tf.getMaxTxnId());
         }
         if (transactionManager != null && max > 0) {
-            transactionManager.initNextTxnId(max + 100);
+            transactionManager.updateNextTxnId(max + 100);
         }
 
-        // Pre-open BPlusTree handles for all existing indexes (rebuilding if recovered)
         final boolean rebuildIndexes = recovered;
         loadIndexesMeta(dbDir).forEach(meta -> {
             Path idxPath = dbDir.resolve(meta.name().toLowerCase() + ".idx");
-            TableFile tf = openFiles.get(meta.tableName().toLowerCase());
+            TableFile tf = db.files.get(meta.tableName().toLowerCase());
             if (tf != null && tf.getSchema().findColumn(meta.columnName()) != null) {
                 DataType keyType = tf.getSchema().findColumn(meta.columnName()).dataType();
                 if (rebuildIndexes) {
                     try { Files.deleteIfExists(idxPath); } catch (IOException ignored) {}
                 }
-                DiskPageManager dpm = new DiskPageManager(idxPath);
-                BufferPool bp = new BufferPool(dpm);
+                BufferPool bp = new BufferPool(new DiskPageManager(idxPath));
                 dev.koradb.index.BPlusTree bTree = new dev.koradb.index.BPlusTree(
                         meta.name(), meta.tableName(), meta.columnName(), keyType, meta.unique(), bp);
                 if (rebuildIndexes) {
-                    for (TableFile.RidRow rr : tf.scanWithRids()) {
+                    // Index every stored version: entries are hints, IndexScan re-checks visibility.
+                    for (TableFile.RidRow rr : tf.scanAllVersions()) {
                         Object val = rr.row().get(meta.columnName());
                         if (val != null) {
-                            bTree.insert(new dev.koradb.index.IndexKey(val, keyType), rr.rid());
+                            bTree.insertUnchecked(new dev.koradb.index.IndexKey(val, keyType), rr.rid());
                         }
                     }
                     bTree.flush();
                 }
-                openIndexes.put(meta.name().toLowerCase(), bTree);
+                db.indexes.put(meta.name().toLowerCase(), bTree);
             }
         });
-        log.info("Using database '{}'", name);
+        openDbs.put(key, db);
+        log.info("Opened database '{}'", name);
     }
 
-    @Override
-    public Optional<String> currentDatabase() {
-        return Optional.ofNullable(currentDbName);
-    }
-
-    @Override
-    public Database requireCurrentDatabase() {
-        if (currentDbName == null) {
-            throw new SchemaException("No database selected. Use 'USE <database>' first.");
+    private OpenDb open(String dbName) {
+        String key = requireName(dbName);
+        OpenDb db = openDbs.get(key);
+        if (db == null) {
+            openDatabase(key);
+            db = openDbs.get(key);
         }
-        return getDatabase(currentDbName);
+        return db;
     }
 
     // =========================================================================
-    // Table management
+    // Table management (explicit database; used by the default view and by SessionCatalog)
     // =========================================================================
 
-    @Override
-    public void createTable(Table table) {
-        Path dbDir = requireCurrentDbDir();
-        if (openFiles.containsKey(table.getName().toLowerCase())) {
+    synchronized void createTableIn(String dbName, Table table) {
+        OpenDb db = open(dbName);
+        if (db.files.containsKey(table.getName().toLowerCase())) {
             throw new SchemaException(
-                    "Table '%s' already exists in database '%s'"
-                            .formatted(table.getName(), currentDbName));
+                    "Table '%s' already exists in database '%s'".formatted(table.getName(), db.name));
         }
-        // Create .kdb file and open TableFile
-        Path      filePath = StorageConfig.tableFilePath(dbDir, table.getName());
-        BufferPool bp       = new BufferPool(new DiskPageManager(filePath), logManager);
-        TableFile tf       = new TableFile(table.getSchema(), filePath, bp);
-        openFiles.put(table.getName().toLowerCase(), tf);
+        Path filePath = StorageConfig.tableFilePath(db.dir, table.getName());
+        BufferPool bp = new BufferPool(new DiskPageManager(filePath), db.logManager);
+        TableFile tf = new TableFile(table.getSchema(), filePath, bp);
+        db.files.put(table.getName().toLowerCase(), tf);
+        appendToMeta(db.dir, table);
 
-        // Persist the schema to catalog.meta
-        appendToMeta(dbDir, table);
-
-        if (logManager != null && !suppressWalLogging) {
+        if (db.logManager != null && !suppressWalLogging) {
             StringBuilder sb = new StringBuilder("CREATE TABLE ").append(table.getName()).append(" (");
             List<ColumnDef> cols = table.getSchema().columns();
             for (int i = 0; i < cols.size(); i++) {
@@ -300,72 +385,53 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
                 sb.append(cols.get(i).name()).append(" ").append(cols.get(i).dataType());
             }
             sb.append(")");
-            long lsn = logManager.appendDdl(0L, 0L, sb.toString());
-            logManager.flush(lsn);
+            long lsn = db.logManager.appendDdl(0L, 0L, sb.toString());
+            db.logManager.flush(lsn);
         }
-
-        log.info("Created table '{}' in database '{}'", table.getName(), currentDbName);
+        log.info("Created table '{}' in database '{}'", table.getName(), db.name);
     }
 
-    @Override
-    public void dropTable(String tableName) {
-        requireCurrentDbDir();
+    synchronized void dropTableIn(String dbName, String tableName) {
+        OpenDb db = open(dbName);
         String key = tableName.toLowerCase();
-        if (!openFiles.containsKey(key)) {
-            throw new SchemaException(
-                    "Table '%s' does not exist in database '%s'"
-                            .formatted(tableName, currentDbName));
+        if (!db.files.containsKey(key)) {
+            throw new SchemaException("Table '%s' does not exist in database '%s'".formatted(tableName, db.name));
         }
-
-        // Drop any indexes belonging to this table
-        List<String> indexesToDrop = openIndexes.values().stream()
+        List<String> indexesToDrop = db.indexes.values().stream()
                 .filter(idx -> idx.getTableName().equalsIgnoreCase(tableName))
                 .map(dev.koradb.index.BPlusTree::getName)
                 .toList();
         for (String idxName : indexesToDrop) {
-            dropIndex(idxName);
+            dropIndexIn(dbName, idxName);
         }
-
-        // Close and remove the TableFile
-        TableFile tf = openFiles.remove(key);
+        TableFile tf = db.files.remove(key);
         tf.close();
-
-        // Delete the .kdb file
-        Path filePath = StorageConfig.tableFilePath(dbDir(currentDbName), tableName);
+        Path filePath = StorageConfig.tableFilePath(db.dir, tableName);
         try { Files.deleteIfExists(filePath); } catch (IOException e) {
             log.warn("Could not delete table file: {}", filePath, e);
         }
-
-        // Rewrite catalog.meta without this table
-        rewriteMeta(dbDir(currentDbName));
-
-        if (logManager != null && !suppressWalLogging) {
-            long lsn = logManager.appendDdl(0L, 0L, "DROP TABLE " + tableName);
-            logManager.flush(lsn);
+        rewriteMeta(db);
+        if (db.logManager != null && !suppressWalLogging) {
+            long lsn = db.logManager.appendDdl(0L, 0L, "DROP TABLE " + tableName);
+            db.logManager.flush(lsn);
         }
-
-        log.info("Dropped table '{}' from database '{}'", tableName, currentDbName);
+        log.info("Dropped table '{}' from database '{}'", tableName, db.name);
     }
 
-    @Override
-    public Table getTable(String tableName) {
-        requireCurrentDbDir();
-        String key = tableName.toLowerCase();
-        if (!openFiles.containsKey(key)) {
-            throw new SchemaException(
-                    "Table '%s' does not exist in database '%s'"
-                            .formatted(tableName, currentDbName));
+    Table getTableIn(String dbName, String tableName) {
+        OpenDb db = open(dbName);
+        TableFile tf = db.files.get(tableName.toLowerCase());
+        if (tf == null) {
+            throw new SchemaException("Table '%s' does not exist in database '%s'".formatted(tableName, db.name));
         }
-        // Return a DiskTable proxy that delegates to the open TableFile and updates indexes
-        TableFile tf = openFiles.get(key);
-        return new DiskTable(tableName, tf, () -> getIndexesForTable(tableName));
+        return new DiskTable(tableName, tf, () -> getIndexesForTableIn(dbName, tableName));
     }
 
-    @Override
-    public List<Table> listTables() {
-        requireCurrentDbDir();
-        return openFiles.entrySet().stream()
-                .map(e -> (Table) new DiskTable(e.getKey(), e.getValue(), () -> getIndexesForTable(e.getKey())))
+    List<Table> listTablesIn(String dbName) {
+        OpenDb db = open(dbName);
+        return db.files.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(e -> (Table) new DiskTable(e.getKey(), e.getValue(), () -> getIndexesForTableIn(dbName, e.getKey())))
                 .toList();
     }
 
@@ -373,102 +439,114 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     // Index management
     // =========================================================================
 
-    @Override
-    public void createIndex(String indexName, String tableName, String columnName, boolean unique) {
-        Path dbDir = requireCurrentDbDir();
+    synchronized void createIndexIn(String dbName, String indexName, String tableName, String columnName, boolean unique) {
+        OpenDb db = open(dbName);
         String tableKey = tableName.toLowerCase();
-        if (!openFiles.containsKey(tableKey)) {
-            throw new SchemaException("Table '%s' does not exist in database '%s'".formatted(tableName, currentDbName));
+        if (!db.files.containsKey(tableKey)) {
+            throw new SchemaException("Table '%s' does not exist in database '%s'".formatted(tableName, db.name));
         }
-        if (openIndexes.containsKey(indexName.toLowerCase())) {
-            throw new SchemaException("Index '%s' already exists in database '%s'".formatted(indexName, currentDbName));
+        if (db.indexes.containsKey(indexName.toLowerCase())) {
+            throw new SchemaException("Index '%s' already exists in database '%s'".formatted(indexName, db.name));
         }
-
-        TableFile tf = openFiles.get(tableKey);
+        TableFile tf = db.files.get(tableKey);
         if (!tf.getSchema().hasColumn(columnName)) {
             throw new SchemaException("Column '%s' does not exist in table '%s'".formatted(columnName, tableName));
         }
-
         DataType colType = tf.getSchema().findColumn(columnName).dataType();
-        Path indexPath = dbDir.resolve(indexName.toLowerCase() + ".idx");
-        DiskPageManager dpm = new DiskPageManager(indexPath);
-        BufferPool bp = new BufferPool(dpm);
+        Path indexPath = db.dir.resolve(indexName.toLowerCase() + ".idx");
+        BufferPool bp = new BufferPool(new DiskPageManager(indexPath));
         dev.koradb.index.BPlusTree bTree = new dev.koradb.index.BPlusTree(
                 indexName, tableName, columnName, colType, unique, bp);
-
-        // Populate with existing rows
-        for (TableFile.RidRow rr : tf.scanWithRids()) {
-            Object val = rr.row().get(columnName);
-            if (val != null) {
-                bTree.insert(new dev.koradb.index.IndexKey(val, colType), rr.rid());
+        try {
+            // Unique check over the rows visible now ...
+            if (unique) {
+                Set<Object> seen = new HashSet<>();
+                for (TableFile.RidRow rr : tf.scanWithRids()) {
+                    Object val = rr.row().get(columnName);
+                    if (val != null && !seen.add(val)) {
+                        throw new StorageException("Unique index violation: duplicate key " + val + " in index " + indexName);
+                    }
+                }
             }
+            // ... but index every stored version: older snapshots may still read them, and
+            // IndexScan re-checks visibility and the key for every entry.
+            for (TableFile.RidRow rr : tf.scanAllVersions()) {
+                Object val = rr.row().get(columnName);
+                if (val != null) {
+                    bTree.insertUnchecked(new dev.koradb.index.IndexKey(val, colType), rr.rid());
+                }
+            }
+        } catch (RuntimeException e) {
+            bTree.close();
+            try { Files.deleteIfExists(indexPath); } catch (IOException ignored) {}
+            throw e;
         }
         bTree.flush();
-
-        openIndexes.put(indexName.toLowerCase(), bTree);
-        appendIndexToMeta(dbDir, indexName, tableName, columnName, unique);
-        log.info("Created index '{}' on {}({}) in database '{}'", indexName, tableName, columnName, currentDbName);
+        db.indexes.put(indexName.toLowerCase(), bTree);
+        appendIndexToMeta(db.dir, indexName, tableName, columnName, unique);
+        log.info("Created index '{}' on {}({}) in database '{}'", indexName, tableName, columnName, db.name);
     }
 
-    @Override
-    public void dropIndex(String indexName) {
-        Path dbDir = requireCurrentDbDir();
+    synchronized void dropIndexIn(String dbName, String indexName) {
+        OpenDb db = open(dbName);
         String key = indexName.toLowerCase();
-        dev.koradb.index.BPlusTree bTree = openIndexes.remove(key);
+        dev.koradb.index.BPlusTree bTree = db.indexes.remove(key);
         if (bTree == null) {
-            throw new SchemaException("Index '%s' does not exist in database '%s'".formatted(indexName, currentDbName));
+            throw new SchemaException("Index '%s' does not exist in database '%s'".formatted(indexName, db.name));
         }
         bTree.close();
-        Path indexPath = dbDir.resolve(key + ".idx");
+        Path indexPath = db.dir.resolve(key + ".idx");
         try {
             Files.deleteIfExists(indexPath);
         } catch (IOException e) {
             log.warn("Could not delete index file: {}", indexPath, e);
         }
-        rewriteMeta(dbDir);
-        log.info("Dropped index '{}' from database '{}'", indexName, currentDbName);
+        rewriteMeta(db);
+        log.info("Dropped index '{}' from database '{}'", indexName, db.name);
     }
 
-    @Override
-    public Optional<dev.koradb.index.Index> getIndex(String indexName) {
-        return Optional.ofNullable(openIndexes.get(indexName.toLowerCase()));
+    Optional<dev.koradb.index.Index> getIndexIn(String dbName, String indexName) {
+        if (dbName == null) return Optional.empty();
+        OpenDb db = open(dbName);
+        return Optional.ofNullable(db.indexes.get(indexName.toLowerCase()));
     }
 
-    @Override
-    public Optional<dev.koradb.index.Index> getIndexForColumn(String tableName, String columnName) {
-        return openIndexes.values().stream()
+    Optional<dev.koradb.index.Index> getIndexForColumnIn(String dbName, String tableName, String columnName) {
+        if (dbName == null) return Optional.empty();
+        OpenDb db = open(dbName);
+        return db.indexes.values().stream()
                 .filter(idx -> idx.getTableName().equalsIgnoreCase(tableName)
                         && idx.getColumnName().equalsIgnoreCase(columnName))
+                .sorted(Comparator.comparing(dev.koradb.index.BPlusTree::getName))
                 .map(idx -> (dev.koradb.index.Index) idx)
                 .findFirst();
     }
 
-    @Override
-    public List<dev.koradb.index.Index> getIndexesForTable(String tableName) {
-        return openIndexes.values().stream()
+    List<dev.koradb.index.Index> getIndexesForTableIn(String dbName, String tableName) {
+        if (dbName == null) return List.of();
+        OpenDb db = open(dbName);
+        return db.indexes.values().stream()
                 .filter(idx -> idx.getTableName().equalsIgnoreCase(tableName))
+                .sorted(Comparator.comparing(dev.koradb.index.BPlusTree::getName))
                 .map(idx -> (dev.koradb.index.Index) idx)
                 .toList();
     }
 
-    @Override
     @SuppressWarnings({"rawtypes", "unchecked"})
-    public TableStatistics getTableStatistics(String tableName) {
-        Table table = getTable(tableName);
+    TableStatistics getTableStatisticsIn(String dbName, String tableName) {
+        Table table = getTableIn(dbName, tableName);
         List<Row> rows = table.getRows();
         long rowCount = rows.size();
         int pageCount = 1;
         if (table instanceof DiskTable dt) {
             pageCount = Math.max(1, dt.getTableFile().pageCount());
         }
-
         Map<String, ColumnStatistics> colStats = new HashMap<>();
         for (ColumnDef col : table.getSchema().columns()) {
             Set<Object> distinctValues = new HashSet<>();
             long nulls = 0;
             Comparable min = null;
             Comparable max = null;
-
             for (Row r : rows) {
                 Object val = r.get(col.name());
                 if (val == null) {
@@ -481,27 +559,127 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
                     }
                 }
             }
-            colStats.put(col.name(), new ColumnStatistics(
-                    col.name(),
-                    Math.max(1, distinctValues.size()),
-                    nulls,
-                    min,
-                    max
-            ));
+            colStats.put(col.name(), new ColumnStatistics(col.name(), Math.max(1, distinctValues.size()), nulls, min, max));
         }
-
         return new TableStatistics(tableName, rowCount, pageCount, colStats);
     }
 
+    dev.koradb.storage.wal.LogManager getLogManagerOf(String dbName) {
+        if (dbName == null) return null;
+        OpenDb db = openDbs.get(dbName.toLowerCase());
+        return db != null ? db.logManager : null;
+    }
+
     // =========================================================================
-    // catalog.meta persistence
+    // Catalog interface — default view (current database of this catalog object)
     // =========================================================================
+
+    @Override public void createTable(Table table)        { createTableIn(currentDbName, table); }
+    @Override public void dropTable(String tableName)      { dropTableIn(currentDbName, tableName); }
+    @Override public Table getTable(String tableName)      { return getTableIn(currentDbName, tableName); }
+    @Override public List<Table> listTables()              { return listTablesIn(currentDbName); }
+
+    @Override
+    public void createIndex(String indexName, String tableName, String columnName, boolean unique) {
+        createIndexIn(currentDbName, indexName, tableName, columnName, unique);
+    }
+
+    @Override public void dropIndex(String indexName)      { dropIndexIn(currentDbName, indexName); }
+
+    @Override
+    public Optional<dev.koradb.index.Index> getIndex(String indexName) {
+        return getIndexIn(currentDbName, indexName);
+    }
+
+    @Override
+    public Optional<dev.koradb.index.Index> getIndexForColumn(String tableName, String columnName) {
+        return getIndexForColumnIn(currentDbName, tableName, columnName);
+    }
+
+    @Override
+    public List<dev.koradb.index.Index> getIndexesForTable(String tableName) {
+        return getIndexesForTableIn(currentDbName, tableName);
+    }
+
+    @Override
+    public TableStatistics getTableStatistics(String tableName) {
+        return getTableStatisticsIn(currentDbName, tableName);
+    }
+
+    /** WAL of the default view's current database (embedded API, replication, checkpoints). */
+    @Override
+    public dev.koradb.storage.wal.LogManager getLogManager() {
+        return getLogManagerOf(currentDbName);
+    }
+
+    public dev.koradb.storage.recovery.RecoveryManager getRecoveryManager() {
+        OpenDb db = currentDbName == null ? null : openDbs.get(currentDbName);
+        if (db == null || db.logManager == null) {
+            return null;
+        }
+        Path walPath = StorageConfig.walFilePath(db.dir);
+        return new dev.koradb.storage.recovery.RecoveryManager(walPath, db.logManager, db.files::get, db.files::values);
+    }
+
+    /** Table files of the default view's current database. */
+    public Collection<TableFile> getOpenTableFiles() {
+        OpenDb db = currentDbName == null ? null : openDbs.get(currentDbName);
+        return db == null ? List.of() : Collections.unmodifiableCollection(db.files.values());
+    }
+
+    /** WALs of every open database (metrics). */
+    public Collection<dev.koradb.storage.wal.LogManager> getAllLogManagers() {
+        List<dev.koradb.storage.wal.LogManager> all = new ArrayList<>();
+        for (OpenDb db : openDbs.values()) if (db.logManager != null) all.add(db.logManager);
+        return all;
+    }
+
+    /** Table files of every open database (metrics, buffer-pool status). */
+    public Collection<TableFile> getAllOpenTableFiles() {
+        List<TableFile> all = new ArrayList<>();
+        for (OpenDb db : openDbs.values()) all.addAll(db.files.values());
+        return all;
+    }
+
+    public TableFile getTableFile(String tableName) {
+        if (tableName == null || currentDbName == null) return null;
+        OpenDb db = openDbs.get(currentDbName);
+        return db == null ? null : db.files.get(tableName.toLowerCase());
+    }
+
+    public Path getDataDir() {
+        return dataDir;
+    }
+
+    @Override
+    public synchronized void close() {
+        for (OpenDb db : openDbs.values()) {
+            closeDb(db);
+        }
+        openDbs.clear();
+        // currentDbName is kept: as before, a closed catalog transparently reopens the database on next use.
+        log.debug("DiskCatalog closed");
+    }
+
+    // =========================================================================
+    // Metadata helpers
+    // =========================================================================
+
+    private void closeDb(OpenDb db) {
+        db.indexes.values().forEach(dev.koradb.index.BPlusTree::close);
+        db.indexes.clear();
+        db.files.values().forEach(TableFile::close);
+        db.files.clear();
+        if (db.logManager != null) {
+            db.logManager.close();
+        }
+    }
 
     private void appendToMeta(Path dbDir, Table table) {
         String line = tableToMetaLine(table) + "\n";
         try {
             Files.writeString(metaFile(dbDir), line, StandardCharsets.UTF_8,
-                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (IOException e) {
             throw new StorageException("Cannot write catalog.meta in " + dbDir, e);
         }
@@ -511,14 +689,14 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         String line = "INDEX " + indexName + " " + tableName + " " + columnName + " " + unique + "\n";
         try {
             Files.writeString(metaFile(dbDir), line, StandardCharsets.UTF_8,
-                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (IOException e) {
             throw new StorageException("Cannot write index to catalog.meta in " + dbDir, e);
         }
     }
 
-    private void rewriteMeta(Path dbDir) {
-        Path metaPath = metaFile(dbDir);
+    private void rewriteMeta(OpenDb db) {
+        Path metaPath = metaFile(db.dir);
         try {
             String existing = Files.exists(metaPath)
                     ? Files.readString(metaPath, StandardCharsets.UTF_8) : "";
@@ -529,9 +707,9 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
                         String[] parts = l.split("\\s+");
                         if (parts.length < 2) return false;
                         if (parts[0].equalsIgnoreCase("TABLE")) {
-                            return openFiles.containsKey(parts[1].toLowerCase());
+                            return db.files.containsKey(parts[1].toLowerCase());
                         } else if (parts[0].equalsIgnoreCase("INDEX")) {
-                            return openIndexes.containsKey(parts[1].toLowerCase());
+                            return db.indexes.containsKey(parts[1].toLowerCase());
                         }
                         return false;
                     })
@@ -539,17 +717,15 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
             Files.writeString(metaPath, String.join("\n", kept) + (kept.isEmpty() ? "" : "\n"),
                     StandardCharsets.UTF_8);
         } catch (IOException e) {
-            throw new StorageException("Cannot rewrite catalog.meta in " + dbDir, e);
+            throw new StorageException("Cannot rewrite catalog.meta in " + db.dir, e);
         }
     }
 
     private record IndexMeta(String name, String tableName, String columnName, boolean unique) {}
 
-    /** Loads all table schemas from catalog.meta. */
     private List<Table> loadTablesMeta(Path dbDir) {
         Path metaPath = metaFile(dbDir);
         if (!Files.exists(metaPath)) return List.of();
-
         try {
             return Files.readAllLines(metaPath, StandardCharsets.UTF_8).stream()
                     .map(String::trim)
@@ -561,11 +737,9 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         }
     }
 
-    /** Loads all index definitions from catalog.meta. */
     private List<IndexMeta> loadIndexesMeta(Path dbDir) {
         Path metaPath = metaFile(dbDir);
         if (!Files.exists(metaPath)) return List.of();
-
         try {
             return Files.readAllLines(metaPath, StandardCharsets.UTF_8).stream()
                     .map(String::trim)
@@ -580,10 +754,6 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         }
     }
 
-    /**
-     * Parses a line like:
-     * {@code TABLE users id:INT name:VARCHAR age:INT active:BOOLEAN salary:DOUBLE}
-     */
     private Table parseMetaLine(String line) {
         String[] tokens = line.trim().split("\\s+");
         if (tokens.length < 2 || !tokens[0].equalsIgnoreCase("TABLE")) {
@@ -608,62 +778,6 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         return "TABLE " + table.getName() + " " + cols;
     }
 
-    // =========================================================================
-    // Lifecycle
-    // =========================================================================
-
-    @Override
-    public void close() {
-        closeOpenIndexes();
-        closeOpenFiles();
-        if (logManager != null) {
-            logManager.close();
-            logManager = null;
-        }
-        log.debug("DiskCatalog closed");
-    }
-
-    @Override
-    public dev.koradb.storage.wal.LogManager getLogManager() {
-        return logManager;
-    }
-
-    public dev.koradb.storage.recovery.RecoveryManager getRecoveryManager() {
-        if (currentDbName == null || logManager == null) {
-            return null;
-        }
-        Path dbDir = dbDir(currentDbName);
-        Path walPath = StorageConfig.walFilePath(dbDir);
-        return new dev.koradb.storage.recovery.RecoveryManager(walPath, logManager, openFiles::get, openFiles::values);
-    }
-
-    public Collection<TableFile> getOpenTableFiles() {
-        return Collections.unmodifiableCollection(openFiles.values());
-    }
-
-    public TableFile getTableFile(String tableName) {
-        if (tableName == null) return null;
-        return openFiles.get(tableName.toLowerCase());
-    }
-
-    public Path getDataDir() {
-        return dataDir;
-    }
-
-    private void closeOpenIndexes() {
-        openIndexes.values().forEach(dev.koradb.index.BPlusTree::close);
-        openIndexes.clear();
-    }
-
-    private void closeOpenFiles() {
-        openFiles.values().forEach(TableFile::close);
-        openFiles.clear();
-    }
-
-    // =========================================================================
-    // Private path helpers
-    // =========================================================================
-
     private Path dbDir(String dbName) {
         return dataDir.resolve(dbName.toLowerCase());
     }
@@ -672,11 +786,11 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         return dbDir.resolve(StorageConfig.CATALOG_META_FILE);
     }
 
-    private Path requireCurrentDbDir() {
-        if (currentDbName == null) {
+    private static String requireName(String dbName) {
+        if (dbName == null) {
             throw new SchemaException("No database selected. Use 'USE <database>' first.");
         }
-        return dbDir(currentDbName);
+        return dbName.toLowerCase();
     }
 
     private void requireDbDir(String name, Path dbDir) {

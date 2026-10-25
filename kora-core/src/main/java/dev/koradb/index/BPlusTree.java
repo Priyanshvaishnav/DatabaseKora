@@ -163,19 +163,13 @@ public final class BPlusTree implements Index {
     // =========================================================================
 
     @Override
-    public Optional<RecordId> search(IndexKey key) {
-        int leafPid = findLeafPageId(key);
-        BufferFrame frame = bufferPool.pin(leafPid);
-        try {
-            BPlusTreeLeafNode leaf = BPlusTreeLeafNode.deserialize(frame.getPage(), keyType);
-            return leaf.find(key);
-        } finally {
-            bufferPool.unpin(frame);
-        }
+    public synchronized Optional<RecordId> search(IndexKey key) {
+        List<RecordId> all = rangeScan(key, key, true, true);
+        return all.isEmpty() ? Optional.empty() : Optional.of(all.get(0));
     }
 
     @Override
-    public List<RecordId> searchAll(IndexKey key) {
+    public synchronized List<RecordId> searchAll(IndexKey key) {
         return rangeScan(key, key, true, true);
     }
 
@@ -184,14 +178,16 @@ public final class BPlusTree implements Index {
     // =========================================================================
 
     @Override
-    public List<RecordId> rangeScan(IndexKey low, IndexKey high, boolean lowInclusive, boolean highInclusive) {
+    public synchronized List<RecordId> rangeScan(IndexKey low, IndexKey high, boolean lowInclusive, boolean highInclusive) {
         List<RecordId> results = new ArrayList<>();
         int currLeafPid;
 
         if (low == null) {
             currLeafPid = findLeftmostLeafPageId();
         } else {
-            currLeafPid = findLeafPageId(low);
+            // Start at the leftmost leaf that can hold `low`: duplicates of a separator key
+            // may sit in the leaf to its left after a split.
+            currLeafPid = findLeftmostLeafPageId(low);
         }
 
         while (currLeafPid != -1) {
@@ -240,13 +236,23 @@ public final class BPlusTree implements Index {
     // =========================================================================
 
     @Override
-    public void insert(IndexKey key, RecordId rid) {
+    public synchronized void insert(IndexKey key, RecordId rid) {
         if (unique) {
             Optional<RecordId> existing = search(key);
             if (existing.isPresent()) {
                 throw new StorageException("Unique index violation: duplicate key " + key + " in index " + name);
             }
         }
+        insertUnchecked(key, rid);
+    }
+
+    /**
+     * Inserts an entry without the unique-key check. Used by the executor, which performs its
+     * own MVCC-aware uniqueness check (an entry whose heap tuple is dead is not a duplicate),
+     * and for adding the entry of a new version of a row whose key did not change.
+     */
+    @Override
+    public synchronized void insertUnchecked(IndexKey key, RecordId rid) {
 
         int leafPid = findLeafPageId(key);
         BufferFrame leafFrame = bufferPool.pin(leafPid);
@@ -363,7 +369,7 @@ public final class BPlusTree implements Index {
         BPlusTreeInternalNode parent;
         try {
             parent = BPlusTreeInternalNode.deserialize(parentFrame.getPage(), keyType);
-            parent.insertChild(splitKey, rightChildPid);
+            parent.insertChildAfter(leftChildPid, splitKey, rightChildPid);
             parent.serialize(parentFrame.getPage());
             bufferPool.markDirty(parentFrame);
             updateParentId(rightChildPid, parentPid);
@@ -455,22 +461,33 @@ public final class BPlusTree implements Index {
     // =========================================================================
 
     @Override
-    public boolean delete(IndexKey key, RecordId rid) {
-        int leafPid = findLeafPageId(key);
-        BufferFrame frame = bufferPool.pin(leafPid);
-        try {
-            BPlusTreeLeafNode leaf = BPlusTreeLeafNode.deserialize(frame.getPage(), keyType);
-            boolean removed = leaf.delete(key, rid);
-            if (removed) {
-                leaf.serialize(frame.getPage());
-                bufferPool.markDirty(frame);
-                entryCount--;
-                writeHeader();
+    public synchronized boolean delete(IndexKey key, RecordId rid) {
+        // Duplicates of `key` can span several leaves: walk the chain from the leftmost one.
+        int leafPid = findLeftmostLeafPageId(key);
+        while (leafPid != -1) {
+            BufferFrame frame = bufferPool.pin(leafPid);
+            int nextPid;
+            try {
+                BPlusTreeLeafNode leaf = BPlusTreeLeafNode.deserialize(frame.getPage(), keyType);
+                boolean removed = leaf.delete(key, rid);
+                if (removed) {
+                    leaf.serialize(frame.getPage());
+                    bufferPool.markDirty(frame);
+                    entryCount--;
+                    writeHeader();
+                    return true;
+                }
+                List<IndexKey> keys = leaf.getKeys();
+                if (!keys.isEmpty() && keys.get(keys.size() - 1).compareTo(key) > 0) {
+                    return false; // passed every entry that could match
+                }
+                nextPid = leaf.getNextPageId();
+            } finally {
+                bufferPool.unpin(frame);
             }
-            return removed;
-        } finally {
-            bufferPool.unpin(frame);
+            leafPid = nextPid;
         }
+        return false;
     }
 
     // =========================================================================
@@ -490,6 +507,25 @@ public final class BPlusTree implements Index {
                 }
                 BPlusTreeInternalNode internal = BPlusTreeInternalNode.deserialize(frame.getPage(), keyType);
                 nextPid = internal.findChildPageId(key);
+            } finally {
+                bufferPool.unpin(frame);
+            }
+            currPid = nextPid;
+        }
+    }
+
+    /** Descends to the leftmost leaf that can contain {@code key} (see findLeftmostChildPageId). */
+    private int findLeftmostLeafPageId(IndexKey key) {
+        int currPid = rootPageId;
+        while (true) {
+            BufferFrame frame = bufferPool.pin(currPid);
+            int nextPid;
+            try {
+                if (frame.getPage().readByte(0) == BPlusTreeNodeType.LEAF.getCode()) {
+                    return currPid;
+                }
+                BPlusTreeInternalNode internal = BPlusTreeInternalNode.deserialize(frame.getPage(), keyType);
+                nextPid = internal.findLeftmostChildPageId(key);
             } finally {
                 bufferPool.unpin(frame);
             }

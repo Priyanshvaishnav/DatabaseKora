@@ -53,8 +53,43 @@ public final class BPlusTreeInternalNode {
     }
 
     /**
+     * Finds the LEFTMOST child page that can contain {@code key}.
+     *
+     * <p>With duplicate keys, entries equal to a separator may live in the child to
+     * the LEFT of that separator as well as to its right (a leaf split can cut a run of
+     * duplicates in two). Lookups, range scans and deletes must therefore start at the
+     * first separator that is {@code >= key} and walk the leaf chain rightwards;
+     * {@link #findChildPageId} (right-biased) is only correct for choosing where to insert.
+     */
+    public int findLeftmostChildPageId(IndexKey key) {
+        int lo = 0, hi = keys.size();
+        while (lo < hi) {               // lower bound: first index with keys[i] >= key
+            int mid = (lo + hi) >>> 1;
+            if (keys.get(mid).compareTo(key) < 0) lo = mid + 1; else hi = mid;
+        }
+        return children.get(lo);
+    }
+
+    /**
      * Inserts a key and its right-child pointer in sorted order.
      */
+    /**
+     * Inserts {@code key} and its right child immediately AFTER the child that was split.
+     *
+     * <p>Positioning by key alone is ambiguous when equal separators exist (duplicate keys): the new
+     * child could land among them out of leaf-chain order, and lower-bound lookups would then skip
+     * leaves. Anchoring on the split child keeps parent order == leaf-chain order.
+     */
+    public void insertChildAfter(int leftChildPageId, IndexKey key, int rightChildPageId) {
+        int j = children.indexOf(leftChildPageId);
+        if (j < 0) {
+            insertChild(key, rightChildPageId);
+            return;
+        }
+        keys.add(j, key);
+        children.add(j + 1, rightChildPageId);
+    }
+
     public void insertChild(IndexKey key, int rightChildPageId) {
         int idx = Collections.binarySearch(keys, key);
         if (idx < 0) {

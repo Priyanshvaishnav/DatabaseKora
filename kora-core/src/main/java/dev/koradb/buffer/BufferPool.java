@@ -135,7 +135,7 @@ public final class BufferPool implements AutoCloseable {
      * @return the frame containing the page
      * @throws StorageException if all frames are pinned (pool exhausted)
      */
-    public BufferFrame pin(int pageId) {
+    public synchronized BufferFrame pin(int pageId) {
         BufferFrame frame = frames.get(pageId);
 
         if (frame != null) {
@@ -158,7 +158,7 @@ public final class BufferPool implements AutoCloseable {
         return newFrame;
     }
 
-    public BufferFrame pinNew(Page page) {
+    public synchronized BufferFrame pinNew(Page page) {
         stats.recordMiss();
         evictIfNeeded();
         BufferFrame newFrame = new BufferFrame(page);
@@ -176,7 +176,7 @@ public final class BufferPool implements AutoCloseable {
      *
      * @param frame the frame to unpin (must have been returned by {@link #pin})
      */
-    public void unpin(BufferFrame frame) {
+    public synchronized void unpin(BufferFrame frame) {
         frame.unpin();
         log.debug("Unpinned page={}, pins={}", frame.getPage().getPageId(), frame.getPinCount());
     }
@@ -191,7 +191,7 @@ public final class BufferPool implements AutoCloseable {
      *
      * @param frame the frame whose page was modified
      */
-    public void markDirty(BufferFrame frame) {
+    public synchronized void markDirty(BufferFrame frame) {
         frame.markDirty();
         log.debug("Marked dirty: page={}", frame.getPage().getPageId());
     }
@@ -202,7 +202,7 @@ public final class BufferPool implements AutoCloseable {
      * @param frame the frame whose page was modified
      * @param lsn   the LSN of the log record that dirtied the page
      */
-    public void markDirty(BufferFrame frame, long lsn) {
+    public synchronized void markDirty(BufferFrame frame, long lsn) {
         frame.markDirty(lsn);
         log.debug("Marked dirty: page={} lsn={}", frame.getPage().getPageId(), lsn);
     }
@@ -216,7 +216,7 @@ public final class BufferPool implements AutoCloseable {
      * Enforces WAL invariant before writing.
      * Used at shutdown and before WAL checkpoints.
      */
-    public void flushAll() {
+    public synchronized void flushAll() {
         int flushed = 0;
         for (BufferFrame frame : frames.values()) {
             if (frame.isDirty()) {
@@ -232,7 +232,7 @@ public final class BufferPool implements AutoCloseable {
     /**
      * Writes a specific page to disk immediately (used for allocate-and-write).
      */
-    public void flushPage(int pageId) {
+    public synchronized void flushPage(int pageId) {
         BufferFrame frame = frames.get(pageId);
         if (frame != null && frame.isDirty()) {
             flushFrameToDisk(frame);
@@ -271,7 +271,7 @@ public final class BufferPool implements AutoCloseable {
      *
      * @return the pinned frame containing the new empty page
      */
-    public BufferFrame allocatePage() {
+    public synchronized BufferFrame allocatePage() {
         Page newPage = diskManager.allocatePage(); // writes empty page to disk
         return pinNew(newPage);
     }
@@ -284,7 +284,7 @@ public final class BufferPool implements AutoCloseable {
     public BufferPoolStats getStats() { return stats; }
 
     /** Returns the number of frames currently in the pool (≤ capacity). */
-    public int size()                  { return frames.size(); }
+    public synchronized int size()                  { return frames.size(); }
 
     /** Returns the maximum number of frames this pool can hold. */
     public int capacity()              { return capacity; }
@@ -299,7 +299,7 @@ public final class BufferPool implements AutoCloseable {
      * Returns a snapshot of dirty pages and their recovery LSNs (pageLSN or recLSN).
      * Used during checkpointing.
      */
-    public Map<Integer, Long> getDirtyPageTable() {
+    public synchronized Map<Integer, Long> getDirtyPageTable() {
         Map<Integer, Long> dpt = new LinkedHashMap<>();
         for (BufferFrame frame : frames.values()) {
             if (frame.isDirty()) {
@@ -319,7 +319,7 @@ public final class BufferPool implements AutoCloseable {
      * Must be called when the database shuts down.
      */
     @Override
-    public void close() {
+    public synchronized void close() {
         flushAll();
         diskManager.close();
         log.debug("BufferPool closed. {}", stats);

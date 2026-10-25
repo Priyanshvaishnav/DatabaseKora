@@ -92,7 +92,7 @@ public final class StatementExecutor {
             case DropTableStmt      s -> executeDropTable(s, catalog, txn, lockManager);
             case CreateIndexStmt    s -> executeCreateIndex(s, catalog);
             case DropIndexStmt      s -> executeDropIndex(s, catalog);
-            case InsertStmt         s -> executeInsert(s, catalog, txn, lockManager);
+            case InsertStmt         s -> executeInsert(s, catalog, txn, lockManager, txnManager);
             case SelectStmt         s -> executeSelect(s, catalog, txn, lockManager, txnManager);
             case UpdateStmt         s -> executeUpdate(s, catalog, txn, lockManager, txnManager);
             case DeleteStmt         s -> executeDelete(s, catalog, txn, lockManager, txnManager);
@@ -172,7 +172,7 @@ public final class StatementExecutor {
     // INSERT
     // =========================================================================
 
-    private QueryResult executeInsert(InsertStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
+    private QueryResult executeInsert(InsertStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager, TransactionManager txnManager) {
         if (txn != null && lockManager != null && txn.getIsolationLevel() == IsolationLevel.SERIALIZABLE) {
             lockManager.acquireExclusive(txn.getId(), LockResource.table(stmt.tableName()));
         }
@@ -200,16 +200,26 @@ public final class StatementExecutor {
         Row newRow = new Row(rowValues);
         if (table instanceof DiskTable diskTable) {
             TableFile tf = diskTable.getTableFile();
-            RecordId rid = tf.insertRow(newRow, txn);
-            for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
-                Object val = newRow.get(idx.getColumnName());
-                if (val != null) {
-                    idx.insert(new dev.koradb.index.IndexKey(val, idx.getKeyType()), rid);
+            List<dev.koradb.index.Index> indexes = catalog.getIndexesForTable(stmt.tableName());
+            // Unique check BEFORE touching the heap, so a violation leaves nothing behind.
+            // Locking the unique indexes makes check+insert atomic against concurrent writers.
+            withUniqueIndexLocks(indexes, () -> {
+                for (dev.koradb.index.Index idx : indexes) {
+                    if (idx.isUnique()) {
+                        checkUnique(idx, newRow.get(idx.getColumnName()), tf, null, txn, txnManager);
+                    }
                 }
-            }
-            if (txn != null) {
-                txn.addUndoAction(new InsertUndoAction(stmt.tableName(), newRow, rid));
-            }
+                RecordId rid = tf.insertRow(newRow, txn);
+                if (txn != null) {
+                    txn.addUndoAction(new InsertUndoAction(stmt.tableName(), newRow, rid));
+                }
+                for (dev.koradb.index.Index idx : indexes) {
+                    Object val = newRow.get(idx.getColumnName());
+                    if (val != null) {
+                        idx.insertUnchecked(new dev.koradb.index.IndexKey(val, idx.getKeyType()), rid);
+                    }
+                }
+            });
         } else {
             if (txn != null) {
                 table.insertRow(newRow, txn);
@@ -342,22 +352,29 @@ public final class StatementExecutor {
                             newVals.put(a.columnName(), typed);
                         }
                         Row newRow = new Row(newVals);
-                        RecordId newRid = tf.updateRow(rr.rid(), newRow, txn);
-                        for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
-                            Object oldVal = rr.row().get(idx.getColumnName());
-                            Object newVal = newVals.get(idx.getColumnName());
-                            if (!java.util.Objects.equals(oldVal, newVal)) {
-                                if (oldVal != null) {
-                                    idx.delete(new dev.koradb.index.IndexKey(oldVal, idx.getKeyType()), rr.rid());
-                                }
-                                if (newVal != null) {
-                                    idx.insert(new dev.koradb.index.IndexKey(newVal, idx.getKeyType()), newRid);
+                        List<dev.koradb.index.Index> indexes = catalog.getIndexesForTable(stmt.tableName());
+                        withUniqueIndexLocks(indexes, () -> {
+                            for (dev.koradb.index.Index idx : indexes) {
+                                Object oldVal = rr.row().get(idx.getColumnName());
+                                Object newVal = newVals.get(idx.getColumnName());
+                                if (idx.isUnique() && !java.util.Objects.equals(oldVal, newVal)) {
+                                    checkUnique(idx, newVal, tf, rr.rid(), txn, txnManager);
                                 }
                             }
-                        }
-                        if (txn != null) {
-                            txn.addUndoAction(new UpdateUndoAction(stmt.tableName(), rr.row(), newRow, newRid));
-                        }
+                            RecordId newRid = tf.updateRow(rr.rid(), newRow, txn);
+                            if (txn != null) {
+                                txn.addUndoAction(new UpdateUndoAction(stmt.tableName(), rr.row(), newRow, rr.rid(), newRid, txn.getId().value()));
+                            }
+                            // MVCC: the new version lives at a new RID, so EVERY index needs an entry for it
+                            // (even when the key is unchanged). Old entries stay: older snapshots and a
+                            // rollback still need them; IndexScan re-checks visibility and the key.
+                            for (dev.koradb.index.Index idx : indexes) {
+                                Object newVal = newVals.get(idx.getColumnName());
+                                if (newVal != null) {
+                                    idx.insertUnchecked(new dev.koradb.index.IndexKey(newVal, idx.getKeyType()), newRid);
+                                }
+                            }
+                        });
                         count++;
                     }
                 }
@@ -439,14 +456,10 @@ public final class StatementExecutor {
                 for (TableFile.RidRow rr : tf.scanWithRids()) {
                     if (matchesWhere(rr.row(), stmt.where(), evaluator)) {
                         tf.deleteRow(rr.rid(), txn);
-                        for (dev.koradb.index.Index idx : catalog.getIndexesForTable(stmt.tableName())) {
-                            Object val = rr.row().get(idx.getColumnName());
-                            if (val != null) {
-                                idx.delete(new dev.koradb.index.IndexKey(val, idx.getKeyType()), rr.rid());
-                            }
-                        }
+                        // Index entries are kept: the deleted version is still visible to older
+                        // snapshots and comes back on ROLLBACK. IndexScan filters dead versions.
                         if (txn != null) {
-                            txn.addUndoAction(new DeleteUndoAction(stmt.tableName(), rr.row()));
+                            txn.addUndoAction(new DeleteUndoAction(stmt.tableName(), rr.row(), rr.rid(), txn.getId().value()));
                         }
                         count++;
                     }
@@ -568,4 +581,45 @@ public final class StatementExecutor {
                 "Cannot assign value '%s' (type %s) to column '%s' of type %s"
                         .formatted(value, value.getClass().getSimpleName(), colName, target));
     }
+
+    // =========================================================================
+    // Unique-index helpers (MVCC aware)
+    // =========================================================================
+
+    private static void withUniqueIndexLocks(List<dev.koradb.index.Index> indexes, Runnable body) {
+        List<dev.koradb.index.Index> uniques = indexes.stream().filter(dev.koradb.index.Index::isUnique).toList();
+        lockAndRun(uniques, 0, body);
+    }
+
+    private static void lockAndRun(List<dev.koradb.index.Index> locks, int i, Runnable body) {
+        if (i == locks.size()) { body.run(); return; }
+        synchronized (locks.get(i)) { lockAndRun(locks, i + 1, body); }
+    }
+
+    /**
+     * Throws if another LIVE row version already holds {@code value} in a unique index.
+     * Index entries pointing at dead versions (deleted/updated by a committed txn, or written by an
+     * aborted txn) are not duplicates. {@code selfRid} is the version being replaced by an UPDATE.
+     */
+    private static void checkUnique(dev.koradb.index.Index idx, Object value, TableFile tf, RecordId selfRid,
+                                    Transaction txn, TransactionManager txnManager) {
+        if (value == null) return;
+        dev.koradb.index.IndexKey key = new dev.koradb.index.IndexKey(value, idx.getKeyType());
+        long me = txn != null ? txn.getId().value() : 0L;
+        for (RecordId rid : idx.searchAll(key)) {
+            if (rid.equals(selfRid)) continue;
+            Row r = tf.readRawRow(rid);
+            if (r == null || !java.util.Objects.equals(r.get(idx.getColumnName()), value)) continue;
+            boolean xminAborted = r.getXmin() != 0L && txnManager != null && txnManager.isAborted(r.getXmin());
+            if (xminAborted) continue;
+            long xmax = r.getXmax();
+            boolean deleted = xmax != 0L
+                    && (xmax == me || (txnManager != null && txnManager.isCommitted(xmax)));
+            if (!deleted) {
+                throw new dev.koradb.exception.StorageException("Unique index violation: duplicate key '%s' in index '%s'"
+                        .formatted(value, idx.getName()));
+            }
+        }
+    }
+
 }

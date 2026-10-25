@@ -191,6 +191,17 @@ public final class KoraHttpServer implements AutoCloseable {
             try {
                 db.execute(session, "USE " + targetDb);
             } catch (Exception e) {
+                String msg = String.valueOf(e.getMessage());
+                if (!msg.contains("does not exist")) {
+                    // The database exists but could not be opened (e.g. recovery failed): report the
+                    // real cause instead of masking it behind a failed CREATE ("already exists").
+                    sendJson(exchange, 500, Map.of(
+                            "status", "error",
+                            "code", "STORAGE_ERROR",
+                            "error", "Cannot open database '" + targetDb + "': " + msg
+                    ));
+                    return;
+                }
                 try {
                     db.execute(session, "CREATE DATABASE " + targetDb);
                     db.execute(session, "USE " + targetDb);

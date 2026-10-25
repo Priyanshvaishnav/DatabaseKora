@@ -148,4 +148,63 @@ public class Transaction {
                 ", undoActions=" + undoStack.size() +
                 '}';
     }
+
+    // =========================================================================
+    // WAL binding (a transaction writes to exactly one database's WAL)
+    // =========================================================================
+
+    private volatile java.util.function.LongPredicate abortedCheck = id -> false;
+    private volatile dev.koradb.storage.wal.LogManager boundLogManager;
+    private final java.util.Map<String, dev.koradb.storage.TableFile> touchedTables = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Installed by the TransactionManager so storage code can tell whether another txn aborted. */
+    public void setAbortedCheck(java.util.function.LongPredicate check) {
+        this.abortedCheck = java.util.Objects.requireNonNull(check);
+    }
+
+    public boolean isOtherTxnAborted(long txnId) {
+        return abortedCheck.test(txnId);
+    }
+
+    /**
+     * Binds this transaction to the WAL of the database it is modifying, writing its BEGIN record
+     * there on the first write. A transaction may modify only one database: its undo chain
+     * (prevLsn links) must live in a single WAL file.
+     */
+    public synchronized void bindWal(dev.koradb.storage.wal.LogManager lm, dev.koradb.storage.TableFile table) {
+        if (lm == null) return;
+        if (boundLogManager == null) {
+            boundLogManager = lm;
+            if (prevLsn == 0L) {
+                prevLsn = lm.appendBegin(id.value(), 0L);
+            }
+        } else if (boundLogManager != lm) {
+            throw new dev.koradb.exception.ExecutionException(
+                    "A transaction cannot modify more than one database; COMMIT or ROLLBACK first");
+        }
+        touchedTables.putIfAbsent(table.getTableName().toLowerCase(), table);
+    }
+
+    /** Pre-binds the WAL without writing a data record (used when BEGIN was logged eagerly). */
+    public synchronized void presetWal(dev.koradb.storage.wal.LogManager lm) {
+        if (boundLogManager == null) boundLogManager = lm;
+    }
+
+    public dev.koradb.storage.wal.LogManager getBoundLogManager() {
+        return boundLogManager;
+    }
+
+    public dev.koradb.storage.TableFile getTouchedTable(String tableName) {
+        return tableName == null ? null : touchedTables.get(tableName.toLowerCase());
+    }
+
+    public java.util.Collection<dev.koradb.storage.TableFile> getTouchedTables() {
+        return touchedTables.values();
+    }
+
+    /** Discards in-memory undo actions (used when the rollback is driven by the WAL instead). */
+    public void clearUndoActions() {
+        undoStack.clear();
+    }
+
 }
