@@ -35,5 +35,6 @@ public sealed interface Statement
                 ExplainStmt,
                 BeginStmt,
                 CommitStmt,
-                RollbackStmt {
+                RollbackStmt,
+                ShowStmt {
 }

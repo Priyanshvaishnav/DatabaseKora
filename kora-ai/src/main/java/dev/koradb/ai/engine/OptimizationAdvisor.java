@@ -53,7 +53,7 @@ public final class OptimizationAdvisor {
         Matcher whereMatcher = WHERE_PREDICATE.matcher(sql);
         if (whereMatcher.find()) {
             String col = whereMatcher.group(1);
-            if (tableSchema == null || !tableSchema.hasIndexOn(col)) {
+            if (indexable(schema, tableSchema, col) && (tableSchema == null || !tableSchema.hasIndexOn(col))) {
                 String ddl = String.format("CREATE INDEX idx_%s_%s ON %s (%s);",
                         tableName != null ? tableName.toLowerCase() : "table",
                         col.toLowerCase(),
@@ -67,7 +67,7 @@ public final class OptimizationAdvisor {
         Matcher orderMatcher = ORDER_BY_COL.matcher(sql);
         if (orderMatcher.find()) {
             String orderCol = orderMatcher.group(1);
-            if (tableSchema == null || !tableSchema.hasIndexOn(orderCol)) {
+            if (indexable(schema, tableSchema, orderCol) && (tableSchema == null || !tableSchema.hasIndexOn(orderCol))) {
                 String ddl = String.format("CREATE INDEX idx_%s_%s ON %s (%s);",
                         tableName != null ? tableName.toLowerCase() : "table",
                         orderCol.toLowerCase(),
@@ -96,7 +96,14 @@ public final class OptimizationAdvisor {
                     alreadyIndexed = true;
                 }
             }
-            if (!alreadyIndexed && !recommendedDdls.contains(matched)) {
+            // LLM suggestions must parse and name an existing table and column
+            String invalid;
+            try {
+                invalid = SqlSafety.checkAgainstSchema(SqlSafety.parseSingle(matched), schema);
+            } catch (RuntimeException e) {
+                invalid = e.getMessage();
+            }
+            if (invalid == null && !alreadyIndexed && !recommendedDdls.contains(matched)) {
                 recommendedDdls.add(matched);
             }
         }
@@ -119,4 +126,11 @@ public final class OptimizationAdvisor {
         }
         return null;
     }
+
+    /** With a known schema, only real columns of a real table can be indexed. */
+    private static boolean indexable(DatabaseSchema schema, TableSchema tableSchema, String col) {
+        if (schema == null || schema.tables().isEmpty()) return true;     // nothing to check against
+        return tableSchema != null && tableSchema.hasColumn(col);
+    }
+
 }

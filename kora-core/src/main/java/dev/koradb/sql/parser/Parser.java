@@ -139,6 +139,12 @@ public final class Parser {
             case BEGIN    -> parseBegin();
             case COMMIT   -> parseCommit();
             case ROLLBACK -> parseRollback();
+            case DESC     -> parseDescribe();
+            case IDENTIFIER -> {
+                if (token.lexeme().equalsIgnoreCase("SHOW")) yield parseShow();
+                if (token.lexeme().equalsIgnoreCase("DESCRIBE")) yield parseDescribe();
+                throw new ParseException("Expected a SQL statement but found: '" + token.lexeme() + "'", token.line());
+            }
             default       -> throw new ParseException(
                     "Expected a SQL statement but found: '" + token.lexeme() + "'",
                     token.line());
@@ -599,6 +605,26 @@ public final class Parser {
             advance();
         }
         return new CommitStmt();
+    }
+
+    // SHOW TABLES | SHOW DATABASES  ("TABLES"/"DATABASES" are not reserved words)
+    private ShowStmt parseShow() {
+        advance(); // SHOW
+        Token what = peek();
+        String w = what.lexeme() == null ? "" : what.lexeme().toUpperCase(java.util.Locale.ROOT);
+        ShowStmt stmt = switch (w) {
+            case "TABLES"    -> new ShowStmt(ShowStmt.Kind.TABLES, null);
+            case "DATABASES" -> new ShowStmt(ShowStmt.Kind.DATABASES, null);
+            default -> throw new ParseException("Expected TABLES or DATABASES after SHOW but found: '" + what.lexeme() + "'", what.line());
+        };
+        advance();
+        return stmt;
+    }
+
+    // DESCRIBE <table> | DESC <table>
+    private ShowStmt parseDescribe() {
+        advance(); // DESCRIBE / DESC
+        return new ShowStmt(ShowStmt.Kind.COLUMNS, consumeIdentifier("table name"));
     }
 
     private RollbackStmt parseRollback() {

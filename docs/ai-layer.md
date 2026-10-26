@@ -234,10 +234,35 @@ for (String ddl : advice.recommendedIndexDdls()) {
     System.out.println("Recommended DDL: " + ddl);
 }
 
-// 5. End-to-end NL Execution
-AiQueryResult queryResult = ai.query("find users older than 25");
-System.out.println("Rows returned: " + queryResult.rows().size());
+// 5. End-to-end NL Execution (read-only by default)
+AiQueryResult queryResult = ai.ask("find users older than 25");
+if (queryResult.executed()) {
+    System.out.println("Rows returned: " + queryResult.queryResult().rows().size());
+} else {
+    System.out.println("Not executed: " + queryResult.errorMessage());
+}
+
+// Data changes must be allowed explicitly, and must be what the request asks for
+ai.ask("delete users where id = 7", AiExecutionPolicy.ALLOW_WRITES);   // DELETE runs
+ai.ask("how many users are there", AiExecutionPolicy.ALLOW_WRITES);   // a DELETE answer would be refused
 ```
+
+### Safety and grounding
+
+- **Execution policy.** `ask(prompt)` executes only SELECT, SHOW, DESCRIBE and EXPLAIN. INSERT/UPDATE/DELETE need
+  `AiExecutionPolicy.ALLOW_WRITES`, and CREATE/DROP/USE need `ALLOW_ALL`. Even when allowed, a statement runs only
+  if the request asks for that kind of change ("delete", "remove", "update", "add", "drop", ...). A model answering
+  a question with `DROP TABLE` (a wrong answer or a prompt injection) is never executed. Refused SQL is returned in
+  `AiQueryResult.generatedSql()` for review.
+- **Schema validation.** Generated SQL must be exactly one statement whose tables and columns exist. Otherwise the
+  translation is invalid, and remote providers get one correction attempt with the error.
+- **Sample values.** For the offline rule-based provider, the schema context includes the distinct values of
+  low-cardinality text columns (for example `orders.status: 'pending', 'shipped'`), so "pending orders" maps to
+  `status = 'pending'`. They are **not** sent to remote providers unless you call `ai.shareSampleValues(true)`,
+  because they are table data.
+- **Provider errors.** Rate limits (429) and temporary server errors (500/502/503/504) are retried up to 3 times with
+  backoff (honouring `Retry-After`). Remaining failures come back as an invalid `TranslationResult` or a failed
+  `AiQueryResult`; they are not thrown.
 
 ---
 

@@ -76,4 +76,67 @@ public final class SchemaExtractor {
         }
         return new DatabaseSchema(databaseName, map);
     }
+
+    /** Sample values of one table, kept for {@link #SAMPLE_TTL_MILLIS}. */
+    public record CachedSamples(long takenAtMillis, Map<String, List<String>> values) {}
+
+    static final long SAMPLE_TTL_MILLIS = 30_000;
+    static final int SAMPLE_ROWS = 1000;
+    static final int MAX_DISTINCT = 25;
+    static final int MAX_VALUE_LENGTH = 40;
+
+    /**
+     * Returns {@code schema} with the distinct values of its low-cardinality VARCHAR columns
+     * (at most {@value #MAX_DISTINCT} values of at most {@value #MAX_VALUE_LENGTH} characters, from the
+     * first {@value #SAMPLE_ROWS} rows), e.g. order statuses or city names. These let a model map
+     * "pending orders" to {@code status = 'pending'}. Results are cached per table for 30 seconds.
+     */
+    public static DatabaseSchema withSampleValues(DatabaseSchema schema, dev.koradb.KoraDB db,
+                                                  Map<String, CachedSamples> cache) {
+        if (schema == null || db == null) return schema;
+        Map<String, List<String>> all = new LinkedHashMap<>();
+        long now = System.currentTimeMillis();
+        for (TableSchema ts : schema.tables().values()) {
+            List<String> textCols = ts.columns().stream()
+                    .filter(c -> c.dataType() == dev.koradb.sql.ast.DataType.VARCHAR)
+                    .map(ColumnDef::name).toList();
+            if (textCols.isEmpty()) continue;
+            String key = (schema.databaseName() + "." + ts.tableName()).toLowerCase();
+            CachedSamples cached = cache != null ? cache.get(key) : null;
+            if (cached == null || now - cached.takenAtMillis() > SAMPLE_TTL_MILLIS) {
+                cached = new CachedSamples(now, sample(db, ts.tableName(), textCols));
+                if (cache != null) cache.put(key, cached);
+            }
+            all.putAll(cached.values());
+        }
+        return new DatabaseSchema(schema.databaseName(), schema.tables(), all);
+    }
+
+    private static Map<String, List<String>> sample(dev.koradb.KoraDB db, String table, List<String> cols) {
+        Map<String, List<String>> out = new LinkedHashMap<>();
+        dev.koradb.execution.QueryResult qr;
+        try {
+            qr = db.execute("SELECT " + String.join(", ", cols) + " FROM " + table + " LIMIT " + SAMPLE_ROWS);
+        } catch (RuntimeException e) {
+            return out;   // samples are an optional hint
+        }
+        for (String col : cols) {
+            Map<String, Integer> counts = new LinkedHashMap<>();
+            boolean tooMany = false;
+            for (dev.koradb.catalog.Row r : qr.rows()) {
+                Object v = r.get(col);
+                if (!(v instanceof String str) || str.isBlank() || str.length() > MAX_VALUE_LENGTH) continue;
+                counts.merge(str, 1, Integer::sum);
+                if (counts.size() > MAX_DISTINCT) { tooMany = true; break; }
+            }
+            if (tooMany || counts.isEmpty()) continue;
+            // a column whose values are all distinct (names, emails) is not categorical
+            if (counts.size() > 1 && counts.size() == qr.rows().size() && qr.rows().size() > 5) continue;
+            List<String> vals = new ArrayList<>(counts.keySet());
+            vals.sort((a, b) -> Integer.compare(counts.get(b), counts.get(a)));
+            out.put((table + "." + col).toLowerCase(), vals);
+        }
+        return out;
+    }
+
 }

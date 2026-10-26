@@ -100,6 +100,7 @@ public final class StatementExecutor {
             case BeginStmt          s -> QueryResult.ddl();
             case CommitStmt         s -> QueryResult.ddl();
             case RollbackStmt       s -> QueryResult.ddl();
+            case ShowStmt           s -> executeShow(s, catalog);
         };
     }
 
@@ -657,6 +658,35 @@ public final class StatementExecutor {
             if (!deleted) {
                 throw new dev.koradb.exception.StorageException("Unique index violation: duplicate key '%s' in index '%s'"
                         .formatted(value, idx.getName()));
+            }
+        }
+    }
+
+
+    private QueryResult executeShow(ShowStmt stmt, Catalog catalog) {
+        List<Row> rows = new ArrayList<>();
+        switch (stmt.kind()) {
+            case DATABASES -> {
+                for (String name : catalog.listDatabases()) {
+                    rows.add(new Row(new java.util.LinkedHashMap<>(Map.of("database", name))));
+                }
+                return new QueryResult(rows, 0, List.of("database"));
+            }
+            case TABLES -> {
+                for (Table t : catalog.requireCurrentDatabase().listTables()) {
+                    rows.add(new Row(new java.util.LinkedHashMap<>(Map.of("table_name", t.getName()))));
+                }
+                return new QueryResult(rows, 0, List.of("table_name"));
+            }
+            default -> {
+                Table t = catalog.getTable(stmt.tableName());
+                for (ColumnDef c : t.getSchema().columns()) {
+                    java.util.LinkedHashMap<String, Object> v = new java.util.LinkedHashMap<>();
+                    v.put("column_name", c.name());
+                    v.put("data_type", c.dataType().name());
+                    rows.add(new Row(v));
+                }
+                return new QueryResult(rows, 0, List.of("column_name", "data_type"));
             }
         }
     }
