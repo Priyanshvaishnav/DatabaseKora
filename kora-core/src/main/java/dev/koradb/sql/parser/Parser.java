@@ -143,6 +143,8 @@ public final class Parser {
             case IDENTIFIER -> {
                 if (token.lexeme().equalsIgnoreCase("SHOW")) yield parseShow();
                 if (token.lexeme().equalsIgnoreCase("DESCRIBE")) yield parseDescribe();
+                if (token.lexeme().equalsIgnoreCase("TRUNCATE")) yield parseTruncate();
+                if (token.lexeme().equalsIgnoreCase("ALTER")) yield parseAlter();
                 throw new ParseException("Expected a SQL statement but found: '" + token.lexeme() + "'", token.line());
             }
             default       -> throw new ParseException(
@@ -184,13 +186,17 @@ public final class Parser {
         if (!unique) {
             consume(INDEX, "INDEX");
         }
+        boolean ifNotExists = parseIfNotExists();
         String indexName = consumeIdentifier("index name");
         consume(ON, "ON");
         String tableName = consumeIdentifier("table name");
         consume(LPAREN, "(");
         String columnName = consumeIdentifier("column name");
+        if (check(COMMA)) {
+            throw new ParseException("Indexes on more than one column are not supported", peek().line());
+        }
         consume(RPAREN, ")");
-        return new CreateIndexStmt(indexName, tableName, columnName, unique);
+        return new CreateIndexStmt(indexName, tableName, columnName, unique, ifNotExists);
     }
 
     /**
@@ -198,8 +204,9 @@ public final class Parser {
      */
     private CreateDatabaseStmt parseCreateDatabase() {
         consume(DATABASE, "DATABASE");
+        boolean ifNotExists = parseIfNotExists();
         String name = consumeIdentifier("database name");
-        return new CreateDatabaseStmt(name);
+        return new CreateDatabaseStmt(name, ifNotExists);
     }
 
     /**
@@ -207,38 +214,166 @@ public final class Parser {
      */
     private CreateTableStmt parseCreateTable() {
         consume(TABLE, "TABLE");
+        boolean ifNotExists = parseIfNotExists();
         String tableName = consumeIdentifier("table name");
 
         consume(LPAREN, "(");
         List<ColumnDef> columns = new ArrayList<>();
+        String[] primaryKey = {null};
+        List<String> unique = new ArrayList<>();
 
-        // At least one column definition required
-        columns.add(parseColumnDef());
-
-        while (check(COMMA)) {
-            advance(); // consume ','
-
-            // Trailing comma guard: if next token is ')' the user accidentally
-            // left a trailing comma — give a clear error
-            if (check(RPAREN)) {
-                throw new ParseException(
-                        "Trailing comma in column list — remove the comma before ')'",
-                        peek().line());
+        do {
+            if (!columns.isEmpty() || primaryKey[0] != null || !unique.isEmpty()) {
+                advance(); // ','
+                if (check(RPAREN)) {
+                    throw new ParseException(
+                            "Trailing comma in column list — remove the comma before ')'",
+                            peek().line());
+                }
             }
-            columns.add(parseColumnDef());
-        }
+            if (isWord("PRIMARY")) {                     // table constraint PRIMARY KEY (col)
+                advance();
+                expectWord("KEY");
+                setPrimaryKey(primaryKey, parseSingleColumnList("PRIMARY KEY"));
+            } else if (check(UNIQUE)) {                  // table constraint UNIQUE (col)
+                advance();
+                unique.add(parseSingleColumnList("UNIQUE"));
+            } else {
+                columns.add(parseColumnDef(primaryKey, unique));
+            }
+        } while (check(COMMA));
 
         consume(RPAREN, ")");
-        return new CreateTableStmt(tableName, columns);
+        if (columns.isEmpty()) {
+            throw new ParseException("CREATE TABLE needs at least one column", peek().line());
+        }
+        // the PRIMARY KEY column is NOT NULL
+        if (primaryKey[0] != null) {
+            boolean found = false;
+            for (int i = 0; i < columns.size(); i++) {
+                ColumnDef c = columns.get(i);
+                if (c.name().equalsIgnoreCase(primaryKey[0])) {
+                    columns.set(i, new ColumnDef(c.name(), c.dataType(), true));
+                    found = true;
+                }
+            }
+            if (!found) throw new ParseException("PRIMARY KEY column '" + primaryKey[0] + "' is not a column of the table", peek().line());
+        }
+        for (String u : unique) {
+            if (columns.stream().noneMatch(c -> c.name().equalsIgnoreCase(u))) {
+                throw new ParseException("UNIQUE column '" + u + "' is not a column of the table", peek().line());
+            }
+        }
+        return new CreateTableStmt(tableName, columns, primaryKey[0], unique, ifNotExists);
+    }
+
+    private void setPrimaryKey(String[] pk, String column) {
+        if (pk[0] != null) throw new ParseException("A table can have only one PRIMARY KEY", peek().line());
+        pk[0] = column;
+    }
+
+    /** {@code ( col )} — composite keys are not supported. */
+    private String parseSingleColumnList(String what) {
+        consume(LPAREN, "(");
+        String col = consumeIdentifier("column name");
+        if (check(COMMA)) {
+            throw new ParseException(what + " on more than one column is not supported", peek().line());
+        }
+        consume(RPAREN, ")");
+        return col;
     }
 
     /**
-     * {@code <columnName> <dataType>}
+     * {@code <columnName> <dataType> [NOT NULL | NULL] [PRIMARY KEY] [UNIQUE]} (constraints in any order)
      */
-    private ColumnDef parseColumnDef() {
+    private ColumnDef parseColumnDef(String[] primaryKey, List<String> unique) {
         String   colName  = consumeIdentifier("column name");
         DataType dataType = parseDataType();
-        return new ColumnDef(colName, dataType);
+        boolean notNull = false;
+        while (true) {
+            if (check(NOT) && peekType(1) == NULL) {
+                advance();
+                advance();
+                notNull = true;
+            } else if (check(NULL)) {
+                advance();
+            } else if (isWord("PRIMARY")) {
+                advance();
+                expectWord("KEY");
+                setPrimaryKey(primaryKey, colName);
+                notNull = true;
+            } else if (check(UNIQUE)) {
+                advance();
+                unique.add(colName);
+            } else {
+                break;
+            }
+        }
+        return new ColumnDef(colName, dataType, notNull);
+    }
+
+    private ColumnDef parseColumnDef() {
+        return parseColumnDef(new String[1], new ArrayList<>());
+    }
+
+    /** True when the current token is the (non-reserved) word {@code w}. */
+    private boolean isWord(String w) {
+        Token t = peek();
+        return t.type() == IDENTIFIER && t.lexeme().equalsIgnoreCase(w);
+    }
+
+    private void expectWord(String w) {
+        if (!isWord(w)) {
+            throw new ParseException("Expected " + w + " but found: '" + peek().lexeme() + "'", peek().line());
+        }
+        advance();
+    }
+
+    /** Optional {@code IF NOT EXISTS}. */
+    private boolean parseIfNotExists() {
+        if (isWord("IF")) {
+            advance();
+            consume(NOT, "NOT");
+            consume(EXISTS, "EXISTS");
+            return true;
+        }
+        return false;
+    }
+
+    /** Optional {@code IF EXISTS}. */
+    private boolean parseIfExists() {
+        if (isWord("IF")) {
+            advance();
+            consume(EXISTS, "EXISTS");
+            return true;
+        }
+        return false;
+    }
+
+    // TRUNCATE [TABLE] <name>
+    private TruncateStmt parseTruncate() {
+        advance(); // TRUNCATE
+        if (check(TABLE)) advance();
+        return new TruncateStmt(consumeIdentifier("table name"));
+    }
+
+    // ALTER TABLE <name> ADD [COLUMN] <col> <type> [NOT NULL]
+    private AlterTableStmt parseAlter() {
+        advance(); // ALTER
+        consume(TABLE, "TABLE");
+        String table = consumeIdentifier("table name");
+        if (!isWord("ADD")) {
+            throw new ParseException("Only ALTER TABLE ... ADD [COLUMN] is supported, found: '" + peek().lexeme() + "'", peek().line());
+        }
+        advance();
+        if (isWord("COLUMN")) advance();
+        String[] pk = new String[1];
+        List<String> unique = new ArrayList<>();
+        ColumnDef col = parseColumnDef(pk, unique);
+        if (pk[0] != null || !unique.isEmpty()) {
+            throw new ParseException("ALTER TABLE ADD COLUMN does not support PRIMARY KEY or UNIQUE; create a unique index instead", peek().line());
+        }
+        return new AlterTableStmt(table, col);
     }
 
     private DataType parseDataType() {
@@ -277,14 +412,16 @@ public final class Parser {
 
     private DropDatabaseStmt parseDropDatabase() {
         consume(DATABASE, "DATABASE");
+        boolean ifExists = parseIfExists();
         String name = consumeIdentifier("database name");
-        return new DropDatabaseStmt(name);
+        return new DropDatabaseStmt(name, ifExists);
     }
 
     private DropTableStmt parseDropTable() {
         consume(TABLE, "TABLE");
+        boolean ifExists = parseIfExists();
         String name = consumeIdentifier("table name");
-        return new DropTableStmt(name);
+        return new DropTableStmt(name, ifExists);
     }
 
     /**
@@ -292,13 +429,14 @@ public final class Parser {
      */
     private DropIndexStmt parseDropIndex() {
         consume(INDEX, "INDEX");
+        boolean ifExists = parseIfExists();
         String indexName = consumeIdentifier("index name");
         String tableName = null;
         if (check(ON)) {
             advance();
             tableName = consumeIdentifier("table name");
         }
-        return new DropIndexStmt(indexName, tableName);
+        return new DropIndexStmt(indexName, tableName, ifExists);
     }
 
     // =========================================================================
@@ -319,25 +457,41 @@ public final class Parser {
     // =========================================================================
 
     /**
-     * {@code INSERT INTO <table> VALUES ( <value> [, ...] )}
+     * {@code INSERT INTO <table> [( c1, c2, ... )] VALUES ( v, ... ) [, ( v, ... )]...}
      */
     private InsertStmt parseInsert() {
         consume(INSERT, "INSERT");
         consume(INTO,   "INTO");
         String tableName = consumeIdentifier("table name");
-        consume(VALUES, "VALUES");
-        consume(LPAREN, "(");
 
-        List<LiteralExpr> values = new ArrayList<>();
-        values.add(parseLiteral());
-
-        while (check(COMMA)) {
+        List<String> columns = null;
+        if (check(LPAREN)) {
             advance();
-            values.add(parseLiteral());
+            columns = new ArrayList<>();
+            columns.add(consumeIdentifier("column name"));
+            while (check(COMMA)) {
+                advance();
+                columns.add(consumeIdentifier("column name"));
+            }
+            consume(RPAREN, ")");
         }
+        consume(VALUES, "VALUES");
 
-        consume(RPAREN, ")");
-        return new InsertStmt(tableName, values);
+        List<List<LiteralExpr>> rows = new ArrayList<>();
+        do {
+            if (!rows.isEmpty()) advance(); // ',' between rows
+            consume(LPAREN, "(");
+            List<LiteralExpr> values = new ArrayList<>();
+            values.add(parseLiteral());
+            while (check(COMMA)) {
+                advance();
+                values.add(parseLiteral());
+            }
+            consume(RPAREN, ")");
+            rows.add(values);
+        } while (check(COMMA));
+
+        return new InsertStmt(tableName, columns, rows);
     }
 
     // =========================================================================
@@ -345,10 +499,16 @@ public final class Parser {
     // =========================================================================
 
     /**
-     * {@code SELECT (*|item,...) FROM <table> [JOIN ...] [WHERE <cond>] [GROUP BY ...] [ORDER BY ...] [LIMIT ... [OFFSET ...]]}
+     * {@code SELECT [DISTINCT] (*|item,...) [FROM <table> [alias] [JOIN ...]...] [WHERE <cond>]
+     * [GROUP BY c, ...] [HAVING <cond>] [ORDER BY ...] [LIMIT ... [OFFSET ...]]}
      */
     private SelectStmt parseSelect() {
         consume(SELECT, "SELECT");
+        boolean distinct = false;
+        if (check(DISTINCT)) {
+            advance();
+            distinct = true;
+        }
 
         List<SelectItem> selectItems = new ArrayList<>();
         if (check(STAR)) {
@@ -361,18 +521,32 @@ public final class Parser {
             }
         }
 
-        consume(FROM, "FROM");
-        String tableName = consumeIdentifier("table name");
+        String tableName = null;
+        String tableAlias = null;
+        List<JoinClause> joins = new ArrayList<>();
+        if (check(FROM)) {
+            advance();
+            tableName = consumeIdentifier("table name");
+            tableAlias = parseOptionalAlias();
 
-        // Optional JOIN: [INNER] JOIN <tableName> ON <condition>
-        Optional<JoinClause> join = Optional.empty();
-        if (check(INNER)) {
-            advance();
-            consume(JOIN, "JOIN");
-            join = Optional.of(parseJoinClause());
-        } else if (check(JOIN)) {
-            advance();
-            join = Optional.of(parseJoinClause());
+            // [INNER] JOIN | LEFT [OUTER] JOIN  <table> [alias] ON <condition>
+            while (check(JOIN) || check(INNER) || check(LEFT)) {
+                boolean left = false;
+                if (check(INNER)) {
+                    advance();
+                } else if (check(LEFT)) {
+                    advance();
+                    if (check(OUTER)) advance();
+                    left = true;
+                }
+                consume(JOIN, "JOIN");
+                String joinTable = consumeIdentifier("joined table name");
+                String joinAlias = parseOptionalAlias();
+                consume(ON, "ON");
+                joins.add(new JoinClause(joinTable, parseExpr(), joinAlias, left));
+            }
+        } else if (selectItems.isEmpty()) {
+            throw new ParseException("SELECT * needs a FROM clause", peek().line());
         }
 
         Optional<WhereClause> where = Optional.empty();
@@ -381,12 +555,22 @@ public final class Parser {
             where = Optional.of(parseWhereClause());
         }
 
-        // Optional GROUP BY: GROUP BY <column>
-        Optional<String> groupBy = Optional.empty();
+        // GROUP BY c1 [, c2 ...]
+        List<String> groupBy = new ArrayList<>();
         if (check(GROUP)) {
             advance();
             consume(BY, "BY");
-            groupBy = Optional.of(consumeQualifiedIdentifier("group by column"));
+            groupBy.add(consumeQualifiedIdentifier("group by column"));
+            while (check(COMMA)) {
+                advance();
+                groupBy.add(consumeQualifiedIdentifier("group by column"));
+            }
+        }
+
+        Optional<Expression> having = Optional.empty();
+        if (check(HAVING)) {
+            advance();
+            having = Optional.of(parseExpr());
         }
 
         // Optional ORDER BY: ORDER BY <col> [ASC | DESC] [, ...]
@@ -416,7 +600,20 @@ public final class Parser {
             offset = Optional.of(parseIntegerLiteral("OFFSET count"));
         }
 
-        return new SelectStmt(selectItems, tableName, join, where, groupBy, orderBy, limit, offset);
+        return new SelectStmt(selectItems, tableName, tableAlias, joins, where, groupBy, having,
+                orderBy, limit, offset, distinct);
+    }
+
+    /** {@code [AS] alias} after a table name (only a plain identifier can be a bare alias). */
+    private String parseOptionalAlias() {
+        if (check(AS)) {
+            advance();
+            return consumeIdentifier("alias");
+        }
+        if (peek().type() == IDENTIFIER) {
+            return advance().lexeme();
+        }
+        return null;
     }
 
     private SelectItem parseSelectItem() {
@@ -458,7 +655,9 @@ public final class Parser {
             return SelectItem.aggregate(aggType, col, alias);
         }
 
-        String colName = consumeQualifiedIdentifier("column name");
+        int startToken = current;
+        Expression expr = parseExpr();
+        String text = textOf(startToken, current);
         String alias = null;
         if (check(AS)) {
             advance();
@@ -467,18 +666,36 @@ public final class Parser {
             alias = advance().lexeme();
         }
 
-        return alias != null ? SelectItem.column(colName, alias) : SelectItem.column(colName);
+        if (expr instanceof ColumnRefExpr ref) {
+            return alias != null ? SelectItem.column(ref.columnName(), alias) : SelectItem.column(ref.columnName());
+        }
+        if (expr instanceof AggregateExpr) {
+            throw new ParseException("Aggregates cannot be combined with other expressions in a select item: " + text, peek().line());
+        }
+        return SelectItem.computed(expr, text, alias);
     }
 
-    private JoinClause parseJoinClause() {
-        String tableName = consumeIdentifier("joined table name");
-        consume(ON, "ON");
-        BinaryExpr condition = parsePredicate();
-        return new JoinClause(tableName, condition);
+    /** SQL text of tokens [from, to) — the display name of a computed select item. */
+    private String textOf(int from, int to) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = from; i < to; i++) {
+            Token t = tokens.get(i);
+            String lex = t.type() == LITERAL_STRING ? "'" + t.lexeme().replace("'", "''") + "'" : t.lexeme();
+            boolean tight = t.type() == DOT || t.type() == RPAREN || t.type() == COMMA
+                    || (i > from && (tokens.get(i - 1).type() == DOT || tokens.get(i - 1).type() == LPAREN));
+            if (sb.length() > 0 && !tight) sb.append(' ');
+            sb.append(lex);
+        }
+        return sb.toString();
     }
 
     private OrderItem parseOrderItem() {
-        String colName = consumeQualifiedIdentifier("ORDER BY column");
+        String colName;
+        if (isAggregateToken(peek().type()) && tokens.get(current + 1).type() == LPAREN) {
+            colName = ((AggregateExpr) parsePrimary()).key();
+        } else {
+            colName = consumeQualifiedIdentifier("ORDER BY column");
+        }
         boolean ascending = true;
         if (check(ASC)) {
             advance();
@@ -544,8 +761,7 @@ public final class Parser {
     private UpdateStmt.Assignment parseAssignment() {
         String colName = consumeIdentifier("column name");
         consume(EQ, "=");
-        LiteralExpr value = parseLiteral();
-        return new UpdateStmt.Assignment(colName, value);
+        return new UpdateStmt.Assignment(colName, parseExpr());
     }
 
     // =========================================================================
@@ -640,57 +856,210 @@ public final class Parser {
     // =========================================================================
 
     /**
-     * Parses one or more predicates joined by AND.
-     * <pre>
-     *   predicate (AND predicate)*
-     * </pre>
+     * Parses a boolean expression; its top-level AND chain becomes the list of conjuncts.
      */
     private WhereClause parseWhereClause() {
-        List<BinaryExpr> predicates = new ArrayList<>();
-        predicates.add(parsePredicate());
+        List<Expression> conjuncts = new ArrayList<>();
+        flattenAnd(parseExpr(), conjuncts);
+        return new WhereClause(conjuncts);
+    }
 
-        while (check(AND)) {
-            advance(); // consume AND
-            predicates.add(parsePredicate());
+    private static void flattenAnd(Expression e, List<Expression> out) {
+        if (e instanceof BinaryExpr b && b.operator() == Operator.AND) {
+            flattenAnd(b.left(), out);
+            flattenAnd(b.right(), out);
+        } else {
+            out.add(e);
         }
+    }
 
-        return new WhereClause(predicates);
+    // expr := or ; or := and (OR and)* ; and := not (AND not)* ; not := NOT not | predicate
+    private Expression parseExpr() {
+        return parseOr();
+    }
+
+    private Expression parseOr() {
+        Expression e = parseAnd();
+        while (check(OR)) {
+            advance();
+            e = new BinaryExpr(e, Operator.OR, parseAnd());
+        }
+        return e;
+    }
+
+    private Expression parseAnd() {
+        Expression e = parseNot();
+        while (check(AND)) {
+            advance();
+            e = new BinaryExpr(e, Operator.AND, parseNot());
+        }
+        return e;
+    }
+
+    private Expression parseNot() {
+        if (check(NOT)) {
+            advance();
+            return new UnaryExpr(UnaryExpr.Kind.NOT, parseNot());
+        }
+        return parsePredicate();
     }
 
     /**
-     * Parses a single comparison predicate: {@code column op (literal | column)}.
+     * predicate := additive [ cmpOp additive | IS [NOT] NULL | [NOT] IN (...) | [NOT] BETWEEN a AND b
+     *                        | [NOT] LIKE pattern ]
      */
-    private BinaryExpr parsePredicate() {
-        Expression lhs;
-        if (peek().type() == IDENTIFIER || isKeywordAsIdentifier(peek().type())) {
-            lhs = new ColumnRefExpr(consumeQualifiedIdentifier("column name in predicate"));
-        } else {
-            lhs = parseLiteral();
+    private Expression parsePredicate() {
+        Expression left = parseAdditive();
+        if (check(IS)) {
+            advance();
+            boolean not = false;
+            if (check(NOT)) {
+                advance();
+                not = true;
+            }
+            consume(NULL, "NULL");
+            return new UnaryExpr(not ? UnaryExpr.Kind.IS_NOT_NULL : UnaryExpr.Kind.IS_NULL, left);
         }
-        Operator op = parseOperator();
-        Expression rhs;
-        if (peek().type() == IDENTIFIER || isKeywordAsIdentifier(peek().type())) {
-            rhs = new ColumnRefExpr(consumeQualifiedIdentifier("column name in predicate"));
-        } else {
-            rhs = parseLiteral();
+        boolean negated = false;
+        if (check(NOT) && (peekType(1) == IN || peekType(1) == BETWEEN || peekType(1) == LIKE)) {
+            advance();
+            negated = true;
         }
-        return new BinaryExpr(lhs, op, rhs);
-    }
-
-    private Operator parseOperator() {
-        Token token = advance();
-        return switch (token.type()) {
+        if (check(IN)) {
+            advance();
+            consume(LPAREN, "(");
+            if (check(SELECT)) {
+                SelectStmt sub = parseSelect();
+                consume(RPAREN, ")");
+                return new InExpr(left, null, sub, negated);
+            }
+            List<Expression> list = new ArrayList<>();
+            list.add(parseExpr());
+            while (check(COMMA)) {
+                advance();
+                list.add(parseExpr());
+            }
+            consume(RPAREN, ")");
+            return new InExpr(left, list, null, negated);
+        }
+        if (check(BETWEEN)) {
+            advance();
+            Expression low = parseAdditive();
+            consume(AND, "AND");
+            Expression high = parseAdditive();
+            return new BetweenExpr(left, low, high, negated);
+        }
+        if (check(LIKE)) {
+            advance();
+            return new BinaryExpr(left, negated ? Operator.NOT_LIKE : Operator.LIKE, parseAdditive());
+        }
+        if (negated) {
+            throw new ParseException("Expected IN, BETWEEN or LIKE after NOT", peek().line());
+        }
+        Operator op = switch (peek().type()) {
             case EQ  -> Operator.EQ;
             case NEQ -> Operator.NEQ;
             case LT  -> Operator.LT;
             case GT  -> Operator.GT;
             case LTE -> Operator.LTE;
             case GTE -> Operator.GTE;
-            default  -> throw new ParseException(
-                    "Expected a comparison operator (=, !=, <, >, <=, >=) " +
-                    "but found: '" + token.lexeme() + "'",
-                    token.line());
+            default  -> null;
         };
+        if (op == null) {
+            return left;
+        }
+        advance();
+        return new BinaryExpr(left, op, parseAdditive());
+    }
+
+    private Expression parseAdditive() {
+        Expression e = parseMultiplicative();
+        while (check(PLUS) || check(MINUS)) {
+            Operator op = advance().type() == PLUS ? Operator.ADD : Operator.SUB;
+            e = new BinaryExpr(e, op, parseMultiplicative());
+        }
+        return e;
+    }
+
+    private Expression parseMultiplicative() {
+        Expression e = parseUnary();
+        while (check(STAR) || check(SLASH) || check(PERCENT)) {
+            TokenType t = advance().type();
+            Operator op = t == STAR ? Operator.MUL : t == SLASH ? Operator.DIV : Operator.MOD;
+            e = new BinaryExpr(e, op, parseUnary());
+        }
+        return e;
+    }
+
+    private Expression parseUnary() {
+        if (check(MINUS)) {
+            TokenType next = peekType(1);
+            if (next == LITERAL_INT || next == LITERAL_LONG || next == LITERAL_DOUBLE) {
+                return parseLiteral();           // negative literal: -5, -2.5
+            }
+            advance();
+            return new UnaryExpr(UnaryExpr.Kind.NEGATE, parseUnary());
+        }
+        if (check(PLUS)) {
+            advance();
+            return parseUnary();
+        }
+        return parsePrimary();
+    }
+
+    /** literal | column | aggregate(...) | ( expr ) | ( SELECT ... ) | EXISTS ( SELECT ... ) */
+    private Expression parsePrimary() {
+        Token t = peek();
+        if (t.type() == LPAREN) {
+            advance();
+            if (check(SELECT)) {
+                SelectStmt sub = parseSelect();
+                consume(RPAREN, ")");
+                return new SubqueryExpr(sub, false);
+            }
+            Expression e = parseExpr();
+            consume(RPAREN, ")");
+            return e;
+        }
+        if (t.type() == EXISTS) {
+            advance();
+            consume(LPAREN, "(");
+            SelectStmt sub = parseSelect();
+            consume(RPAREN, ")");
+            return new SubqueryExpr(sub, true);
+        }
+        if (isAggregateToken(t.type()) && peekType(1) == LPAREN) {
+            advance();
+            consume(LPAREN, "(");
+            String col;
+            if (t.type() == COUNT && check(STAR)) {
+                advance();
+                col = "*";
+            } else {
+                col = consumeQualifiedIdentifier("column name inside " + t.lexeme().toUpperCase(java.util.Locale.ROOT));
+            }
+            consume(RPAREN, ")");
+            return new AggregateExpr(AggregateType.valueOf(t.type().name()), col);
+        }
+        switch (t.type()) {
+            case LITERAL_INT, LITERAL_LONG, LITERAL_DOUBLE, LITERAL_STRING, TRUE, FALSE, NULL -> {
+                return parseLiteral();
+            }
+            default -> { }
+        }
+        if (t.type() == IDENTIFIER || isKeywordAsIdentifier(t.type())) {
+            return new ColumnRefExpr(consumeQualifiedIdentifier("column name"));
+        }
+        throw new ParseException("Expected a value, column or expression but found: '" + t.lexeme() + "'", t.line());
+    }
+
+    private static boolean isAggregateToken(TokenType type) {
+        return type == COUNT || type == SUM || type == AVG || type == MIN || type == MAX;
+    }
+
+    private TokenType peekType(int ahead) {
+        int i = Math.min(current + ahead, tokens.size() - 1);
+        return tokens.get(i).type();
     }
 
     // =========================================================================

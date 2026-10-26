@@ -30,21 +30,16 @@ public final class ConstantFoldingRule implements Rule {
 
         // 2. Apply constant folding if node is LogicalFilter
         if (current instanceof LogicalFilter filter) {
-            List<BinaryExpr> remaining = new ArrayList<>();
-            for (BinaryExpr pred : filter.predicates()) {
-                BinaryExpr normalized = normalize(pred);
+            List<Expression> remaining = new ArrayList<>();
+            for (Expression pred : filter.predicates()) {
+                Expression normalized = pred instanceof BinaryExpr b ? normalize(b) : pred;
                 Boolean constantEval = evaluateConstant(normalized);
-                if (constantEval == null) {
-                    // Not a constant comparison — keep it
-                    remaining.add(normalized);
-                } else if (Boolean.TRUE.equals(constantEval)) {
-                    // Tautology (e.g. 1 = 1) — drop it
-                } else {
-                    // Contradiction (e.g. 1 = 2) — keep the contradiction
+                if (!Boolean.TRUE.equals(constantEval)) {
+                    // not constant, FALSE or UNKNOWN (e.g. 1 = 2, NULL = 1): keep it, it rejects rows
                     remaining.add(normalized);
                 }
+                // constant TRUE (1 = 1): dropped
             }
-
             if (remaining.isEmpty()) {
                 // All predicates were tautologies, filter can be completely removed!
                 return filter.child();
@@ -56,46 +51,35 @@ public final class ConstantFoldingRule implements Rule {
     }
 
     private static BinaryExpr normalize(BinaryExpr expr) {
-        // If literal is on the left and column on the right, flip operands
-        if (expr.left() instanceof LiteralExpr lit && expr.right() instanceof ColumnRefExpr col) {
-            Operator flippedOp = flipOperator(expr.operator());
-            if (flippedOp != null) {
-                return new BinaryExpr(col, flippedOp, lit);
-            }
+        // If literal is on the left and column on the right of a comparison, flip operands
+        if (expr.operator().isComparison() && expr.left() instanceof LiteralExpr lit && expr.right() instanceof ColumnRefExpr col) {
+            return new BinaryExpr(col, flipOperator(expr.operator()), lit);
         }
         return expr;
     }
 
     private static Operator flipOperator(Operator op) {
         return switch (op) {
-            case EQ  -> Operator.EQ;
-            case NEQ -> Operator.NEQ;
             case LT  -> Operator.GT;
             case LTE -> Operator.GTE;
             case GT  -> Operator.LT;
             case GTE -> Operator.LTE;
+            default  -> op;
         };
     }
 
-    private static Boolean evaluateConstant(BinaryExpr expr) {
-        if (expr.left() instanceof LiteralExpr l && expr.right() instanceof LiteralExpr r) {
-            Object v1 = l.value();
-            Object v2 = r.value();
-            if (v1 == null || v2 == null) {
-                return expr.operator() == Operator.NEQ ? Boolean.TRUE : Boolean.FALSE;
-            }
-
-            int cmp = compareLiterals(v1, v2);
-            return switch (expr.operator()) {
-                case EQ  -> cmp == 0;
-                case NEQ -> cmp != 0;
-                case LT  -> cmp < 0;
-                case LTE -> cmp <= 0;
-                case GT  -> cmp > 0;
-                case GTE -> cmp >= 0;
-            };
+    /** Value of an expression without columns, aggregates or subqueries; null when not constant or UNKNOWN. */
+    private static Boolean evaluateConstant(Expression expr) {
+        if (!ExpressionUtils.columns(expr).isEmpty() || ExpressionUtils.hasSubquery(expr)) return null;
+        List<AggregateExpr> aggs = new ArrayList<>();
+        ExpressionUtils.collectAggregates(expr, aggs);
+        if (!aggs.isEmpty()) return null;
+        try {
+            Object v = new dev.koradb.execution.ExpressionEvaluator(null).eval(expr, new dev.koradb.catalog.Row(new java.util.LinkedHashMap<>()));
+            return v instanceof Boolean b ? b : null;
+        } catch (RuntimeException e) {
+            return null;       // leave errors (type mismatch, division by zero) to execution
         }
-        return null;
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

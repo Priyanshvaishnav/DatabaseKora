@@ -73,7 +73,7 @@ class RuleBasedOptimizerTest {
 
         assertThat(optimized).isInstanceOf(LogicalFilter.class);
         LogicalFilter filter = (LogicalFilter) optimized;
-        BinaryExpr pred = filter.predicates().get(0);
+        BinaryExpr pred = (BinaryExpr) filter.predicates().get(0);
         assertThat(pred.left()).isInstanceOf(ColumnRefExpr.class);
         assertThat(((ColumnRefExpr) pred.left()).columnName()).isEqualTo("id");
         assertThat(pred.right()).isInstanceOf(LiteralExpr.class);
@@ -101,13 +101,13 @@ class RuleBasedOptimizerTest {
         assertThat(join.left()).isInstanceOf(LogicalScan.class);
         LogicalScan leftScan = (LogicalScan) join.left();
         assertThat(leftScan.pushedPredicates()).hasSize(1);
-        assertThat(leftScan.pushedPredicates().get(0).operator()).isEqualTo(Operator.GT);
+        assertThat(((BinaryExpr) leftScan.pushedPredicates().get(0)).operator()).isEqualTo(Operator.GT);
 
         // Right scan (orders) should have orders.amount > 100.0 pushed down
         assertThat(join.right()).isInstanceOf(LogicalScan.class);
         LogicalScan rightScan = (LogicalScan) join.right();
         assertThat(rightScan.pushedPredicates()).hasSize(1);
-        assertThat(rightScan.pushedPredicates().get(0).operator()).isEqualTo(Operator.GT);
+        assertThat(((BinaryExpr) rightScan.pushedPredicates().get(0)).operator()).isEqualTo(Operator.GT);
     }
 
     @Test

@@ -19,7 +19,7 @@ import java.util.function.Predicate;
 public class Table {
 
     private final String    name;
-    private final Schema    schema;
+    private volatile Schema schema;
     private final List<Row> rows;
 
     public Table(String name, Schema schema) {
@@ -30,6 +30,9 @@ public class Table {
 
     public String getName() { return name; }
     public Schema getSchema() { return schema; }
+
+    /** Replaces the schema (in-memory ALTER TABLE ADD COLUMN; rows without the column read NULL). */
+    void setSchema(Schema schema) { this.schema = schema; }
 
     /**
      * Returns an unmodifiable snapshot of current rows matching the active ReadView.

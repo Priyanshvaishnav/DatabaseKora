@@ -43,6 +43,7 @@ public final class SqlSafety {
             case InsertStmt s -> StatementKind.WRITE;
             case UpdateStmt s -> StatementKind.WRITE;
             case DeleteStmt s -> StatementKind.WRITE;
+            case TruncateStmt s -> StatementKind.WRITE;
             case BeginStmt s -> StatementKind.TRANSACTION;
             case CommitStmt s -> StatementKind.TRANSACTION;
             case RollbackStmt s -> StatementKind.TRANSACTION;
@@ -74,61 +75,79 @@ public final class SqlSafety {
             case InsertStmt s -> {
                 String e = tableError(s.tableName(), schema);
                 if (e != null) yield e;
-                int n = schema.getTable(s.tableName()).columns().size();
-                yield s.values().size() == n ? null
-                        : "INSERT INTO %s has %d value(s) but the table has %d column(s)".formatted(s.tableName(), s.values().size(), n);
+                if (s.columns() != null) {
+                    String ce = columnsError(s.columns(), single(s.tableName(), schema), List.of());
+                    if (ce != null) yield ce;
+                }
+                int n = s.columns() != null ? s.columns().size() : schema.getTable(s.tableName()).columns().size();
+                for (var row : s.rows()) {
+                    if (row.size() != n) {
+                        yield "INSERT INTO %s has %d value(s) but %d column(s) are being filled".formatted(s.tableName(), row.size(), n);
+                    }
+                }
+                yield null;
             }
             case UpdateStmt s -> {
                 String e = tableError(s.tableName(), schema);
                 if (e != null) yield e;
                 List<String> cols = new ArrayList<>();
-                s.assignments().forEach(a -> cols.add(a.columnName()));
+                s.assignments().forEach(a -> {
+                    cols.add(a.columnName());
+                    ExpressionUtils.collectColumns(a.value(), cols);
+                });
                 s.where().ifPresent(w -> collectColumns(w, cols));
-                yield columnsError(cols, List.of(schema.getTable(s.tableName())), List.of());
+                yield columnsError(cols, single(s.tableName(), schema), List.of());
             }
             case DeleteStmt s -> {
                 String e = tableError(s.tableName(), schema);
                 if (e != null) yield e;
                 List<String> cols = new ArrayList<>();
                 s.where().ifPresent(w -> collectColumns(w, cols));
-                yield columnsError(cols, List.of(schema.getTable(s.tableName())), List.of());
+                yield columnsError(cols, single(s.tableName(), schema), List.of());
             }
-            case DropTableStmt s -> tableError(s.tableName(), schema);
+            case DropTableStmt s -> s.ifExists() ? null : tableError(s.tableName(), schema);
+            case TruncateStmt s -> tableError(s.tableName(), schema);
+            case AlterTableStmt s -> tableError(s.tableName(), schema);
             case CreateIndexStmt s -> {
                 String e = tableError(s.tableName(), schema);
                 if (e != null) yield e;
-                yield columnsError(List.of(s.columnName()), List.of(schema.getTable(s.tableName())), List.of());
+                yield columnsError(List.of(s.columnName()), single(s.tableName(), schema), List.of());
             }
             default -> null;
         };
     }
 
     private static String checkSelect(SelectStmt s, DatabaseSchema schema) {
+        if (s.tableName() == null) return null;                    // SELECT 1
         String e = tableError(s.tableName(), schema);
         if (e != null) return e;
-        List<TableSchema> tables = new ArrayList<>();
-        tables.add(schema.getTable(s.tableName()));
+        // tables by the name rows are qualified with (alias or table name)
+        java.util.Map<String, TableSchema> sources = new java.util.LinkedHashMap<>();
+        sources.put(s.sourceName().toLowerCase(Locale.ROOT), schema.getTable(s.tableName()));
         List<String> cols = new ArrayList<>();
-        if (s.join().isPresent()) {
-            e = tableError(s.join().get().tableName(), schema);
+        for (JoinClause j : s.joins()) {
+            e = tableError(j.tableName(), schema);
             if (e != null) return e;
-            tables.add(schema.getTable(s.join().get().tableName()));
-            collectColumns(s.join().get().onCondition(), cols);
+            sources.put(j.sourceName().toLowerCase(Locale.ROOT), schema.getTable(j.tableName()));
+            if (j.onCondition() != null) ExpressionUtils.collectColumns(j.onCondition(), cols);
         }
         List<String> aliases = new ArrayList<>();
         for (SelectItem item : s.selectItems()) {
             if (item.aggregateType() != null) {
                 if (!"*".equals(item.aggregateColumn())) cols.add(item.aggregateColumn());
-            } else if (!"*".equals(item.expression())) {
+            } else if (item.isComputed()) {
+                ExpressionUtils.collectColumns(item.valueExpr(), cols);
+            } else {
                 cols.add(item.expression());
             }
             if (item.alias() != null) aliases.add(item.alias());
         }
         s.where().ifPresent(w -> collectColumns(w, cols));
-        s.groupBy().ifPresent(cols::add);
-        List<String> orderCols = s.orderBy().stream().map(OrderItem::columnName).toList();
-        e = columnsError(cols, tables, List.of());
-        return e != null ? e : columnsError(orderCols, tables, aliases);
+        cols.addAll(s.groupByColumns());
+        s.having().ifPresent(h -> ExpressionUtils.collectColumns(h, cols));
+        List<String> orderCols = s.orderBy().stream().map(OrderItem::columnName).filter(c -> !c.contains("(")).toList();
+        e = columnsError(cols, sources, List.of());
+        return e != null ? e : columnsError(orderCols, sources, aliases);
     }
 
     private static String tableError(String table, DatabaseSchema schema) {
@@ -137,40 +156,33 @@ public final class SqlSafety {
                 schema.tables().values().stream().map(TableSchema::tableName).collect(Collectors.joining(", ")));
     }
 
-    private static String columnsError(List<String> cols, List<TableSchema> tables, List<String> aliases) {
+    private static java.util.Map<String, TableSchema> single(String table, DatabaseSchema schema) {
+        return java.util.Map.of(table.toLowerCase(Locale.ROOT), schema.getTable(table));
+    }
+
+    private static String columnsError(List<String> cols, java.util.Map<String, TableSchema> sources, List<String> aliases) {
         for (String col : cols) {
             if (aliases.stream().anyMatch(a -> a.equalsIgnoreCase(col))) continue;
-            if (!resolves(col, tables)) {
+            if (!resolves(col, sources)) {
                 return "Column '%s' does not exist in %s (columns: %s)".formatted(col,
-                        tables.stream().map(TableSchema::tableName).collect(Collectors.joining(" / ")),
-                        tables.stream().flatMap(t -> t.columns().stream().map(c -> c.name())).distinct()
+                        sources.values().stream().map(TableSchema::tableName).distinct().collect(Collectors.joining(" / ")),
+                        sources.values().stream().flatMap(t -> t.columns().stream().map(c -> c.name())).distinct()
                                 .collect(Collectors.joining(", ")));
             }
         }
         return null;
     }
 
-    private static boolean resolves(String col, List<TableSchema> tables) {
+    private static boolean resolves(String col, java.util.Map<String, TableSchema> sources) {
         int dot = col.indexOf('.');
         if (dot > 0) {
-            String t = col.substring(0, dot), c = col.substring(dot + 1);
-            return tables.stream().anyMatch(ts -> ts.tableName().equalsIgnoreCase(t) && ts.hasColumn(c));
+            TableSchema t = sources.get(col.substring(0, dot).toLowerCase(Locale.ROOT));
+            return t != null && t.hasColumn(col.substring(dot + 1));
         }
-        return tables.stream().anyMatch(ts -> ts.hasColumn(col));
+        return sources.values().stream().anyMatch(ts -> ts.hasColumn(col));
     }
 
     private static void collectColumns(WhereClause where, List<String> out) {
-        for (BinaryExpr p : where.predicates()) collectColumns(p, out);
-    }
-
-    private static void collectColumns(Expression expr, List<String> out) {
-        switch (expr) {
-            case ColumnRefExpr c -> out.add(c.columnName());
-            case BinaryExpr b -> {
-                collectColumns(b.left(), out);
-                collectColumns(b.right(), out);
-            }
-            default -> { }
-        }
+        for (Expression p : where.predicates()) ExpressionUtils.collectColumns(p, out);
     }
 }

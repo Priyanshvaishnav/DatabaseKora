@@ -12,6 +12,7 @@ import dev.koradb.planner.cost.CostModel;
 import dev.koradb.planner.cost.PlanCost;
 import dev.koradb.planner.logical.*;
 import dev.koradb.sql.ast.BinaryExpr;
+import dev.koradb.sql.ast.Expression;
 import dev.koradb.sql.ast.ColumnRefExpr;
 import dev.koradb.sql.ast.LiteralExpr;
 import dev.koradb.sql.ast.Operator;
@@ -51,6 +52,9 @@ public final class PhysicalPlanner {
             case LogicalSort s      -> planSort(s);
             case LogicalProject p   -> planProject(p);
             case LogicalLimit l     -> planLimit(l);
+            case LogicalValues v    -> new PhysicalPlan(new dev.koradb.execution.operator.ValuesOperator(),
+                    new PlanCost(0, 1, 0), "Values [one row]");
+            case LogicalDistinct d  -> planDistinct(d);
             default -> throw new UnsupportedOperationException("Unknown logical node: " + node);
         };
     }
@@ -69,7 +73,7 @@ public final class PhysicalPlanner {
         // 2. Check if IndexScan is feasible and cheaper
         if (table instanceof DiskTable dt && !scan.pushedPredicates().isEmpty()) {
             for (int i = 0; i < scan.pushedPredicates().size(); i++) {
-                BinaryExpr pred = scan.pushedPredicates().get(i);
+                if (!(scan.pushedPredicates().get(i) instanceof BinaryExpr pred)) continue;
                 if (pred.operator() == Operator.EQ) {
                     String col = null;
                     Object val = null;
@@ -81,6 +85,10 @@ public final class PhysicalPlanner {
                         val = lit.value();
                     }
 
+                    if (col != null && col.contains(".")) {
+                        String q = col.substring(0, col.indexOf('.'));
+                        col = q.equalsIgnoreCase(scan.alias().orElse(scan.tableName())) ? col.substring(col.indexOf('.') + 1) : null;
+                    }
                     if (col != null && val != null) {
                         var indexOpt = catalog.getIndexForColumn(scan.tableName(), col);
                         if (indexOpt.isPresent()) {
@@ -89,7 +97,7 @@ public final class PhysicalPlanner {
                             long matchingRows = Math.max(1, (long) Math.ceil((double) stats.rowCount() / ndv));
                             PlanCost idxCost = CostModel.estimateIndexScanCost(3, matchingRows);
 
-                            List<BinaryExpr> remaining = new ArrayList<>(scan.pushedPredicates());
+                            List<Expression> remaining = new ArrayList<>(scan.pushedPredicates());
                             remaining.remove(i);
 
                             if (!remaining.isEmpty()) {
@@ -101,7 +109,7 @@ public final class PhysicalPlanner {
                             if (idxCost.totalCost() <= fullSeqCost.totalCost() || index.isUnique() || stats.rowCount() >= 10) {
                                 IndexKey key = new IndexKey(val, index.getKeyType());
                                 dev.koradb.execution.operator.Operator op = IndexScanOperator.point(
-                                        dt.getTableFile(), table, index, key);
+                                        dt.getTableFile(), table, index, key).qualifiedAs(scan.alias().orElse(null));
 
                                 if (!remaining.isEmpty()) {
                                     op = new FilterOperator(op, remaining, new ExpressionEvaluator(op.getSchema()));
@@ -117,7 +125,7 @@ public final class PhysicalPlanner {
         }
 
         // Sequential Scan fallback
-        dev.koradb.execution.operator.Operator op = new SeqScanOperator(table);
+        dev.koradb.execution.operator.Operator op = new SeqScanOperator(table, scan.alias().orElse(table.getName()));
         if (!scan.pushedPredicates().isEmpty()) {
             op = new FilterOperator(op, scan.pushedPredicates(), new ExpressionEvaluator(op.getSchema()));
         }
@@ -141,45 +149,57 @@ public final class PhysicalPlanner {
     private PhysicalPlan planJoin(LogicalJoin join) {
         PhysicalPlan leftPlan = plan(join.left());
         PhysicalPlan rightPlan = plan(join.right());
+        boolean leftOuter = join.joinType() == JoinType.LEFT;
+        List<String> rightNames = sourceNames(join.right());
 
-        BinaryExpr on = join.onCondition();
-        if (on != null && on.operator() == Operator.EQ
-                && on.left() instanceof ColumnRefExpr lref
-                && on.right() instanceof ColumnRefExpr rref) {
+        Expression on = join.onCondition();
+        if (on instanceof BinaryExpr eq && eq.operator() == Operator.EQ
+                && eq.left() instanceof ColumnRefExpr lref
+                && eq.right() instanceof ColumnRefExpr rref) {
 
             String lCol = lref.columnName();
             String rCol = rref.columnName();
 
             // Match columns to respective child schemas
-            if (columnBelongsToSide(lCol, join.right()) && columnBelongsToSide(rCol, join.left())) {
+            if (columnBelongsToSide(lCol, join.right()) && columnBelongsToSide(rCol, join.left())
+                    && !(columnBelongsToSide(lCol, join.left()) && columnBelongsToSide(rCol, join.right()))) {
                 String tmp = lCol;
                 lCol = rCol;
                 rCol = tmp;
             }
-
-            dev.koradb.execution.operator.Operator op = new HashJoinOperator(
-                    leftPlan.rootOperator(), rightPlan.rootOperator(), lCol, rCol);
-            PlanCost cost = CostModel.estimateHashJoinCost(rightPlan.cost(), leftPlan.cost());
-            String desc = "HashJoin [Probe=" + findTableName(join.left()) + ", Build=" + findTableName(join.right()) + "]\n"
-                    + indentLines("├── ", leftPlan.planDescription()) + "\n"
-                    + indentLines("└── ", rightPlan.planDescription());
-            return new PhysicalPlan(op, cost, desc);
+            if (columnBelongsToSide(lCol, join.left()) && columnBelongsToSide(rCol, join.right())) {
+                dev.koradb.execution.operator.Operator op = new HashJoinOperator(
+                        leftPlan.rootOperator(), rightPlan.rootOperator(), lCol, rCol, leftOuter, rightNames);
+                PlanCost cost = CostModel.estimateHashJoinCost(rightPlan.cost(), leftPlan.cost());
+                String desc = (leftOuter ? "HashLeftJoin" : "HashJoin") + " [Probe=" + findTableName(join.left())
+                        + ", Build=" + findTableName(join.right()) + "]\n"
+                        + indentLines("├── ", leftPlan.planDescription()) + "\n"
+                        + indentLines("└── ", rightPlan.planDescription());
+                return new PhysicalPlan(op, cost, desc);
+            }
         }
 
-        // Fallback: Nested Loop Join
+        // Fallback: Nested Loop Join (any ON condition)
         dev.koradb.execution.operator.Operator op = new NestedLoopJoinOperator(
-                leftPlan.rootOperator(), rightPlan.rootOperator(), on);
+                leftPlan.rootOperator(), rightPlan.rootOperator(), on, leftOuter, rightNames);
         PlanCost cost = CostModel.estimateNestedLoopJoinCost(leftPlan.cost(), rightPlan.cost());
-        String desc = "NestedLoopJoin [on=" + on + "]\n"
+        String desc = (leftOuter ? "NestedLoopLeftJoin" : "NestedLoopJoin") + " [on=" + on + "]\n"
                 + indentLines("├── ", leftPlan.planDescription()) + "\n"
                 + indentLines("└── ", rightPlan.planDescription());
         return new PhysicalPlan(op, cost, desc);
     }
 
+    private PhysicalPlan planDistinct(LogicalDistinct distinct) {
+        PhysicalPlan child = plan(distinct.child());
+        return new PhysicalPlan(new dev.koradb.execution.operator.DistinctOperator(child.rootOperator()),
+                CostModel.estimateSortCost(child.cost()),
+                "Distinct\n" + indentLines("└── ", child.planDescription()));
+    }
+
     private PhysicalPlan planAggregate(LogicalAggregate agg) {
         PhysicalPlan child = plan(agg.child());
         dev.koradb.execution.operator.Operator op = new AggregateOperator(
-                child.rootOperator(), agg.selectItems(), agg.groupBy().orElse(null));
+                child.rootOperator(), agg.selectItems(), agg.groupByColumns());
 
         long outRows = agg.groupBy().isPresent()
                 ? Math.max(1, child.cost().estimatedRows() / 2)
@@ -187,7 +207,8 @@ public final class PhysicalPlanner {
         PlanCost cost = new PlanCost(
                 child.cost().totalCost() + child.cost().estimatedRows() * CostModel.CPU_TUPLE_COST,
                 outRows, child.cost().estimatedPages());
-        String desc = "Aggregate [groupBy=" + agg.groupBy().orElse("none") + ", items=" + agg.selectItems() + "]\n"
+        String desc = "Aggregate [groupBy=" + (agg.groupByColumns().isEmpty() ? "none" : String.join(", ", agg.groupByColumns()))
+                + ", items=" + agg.selectItems() + "]\n"
                 + indentLines("└── ", child.planDescription());
         return new PhysicalPlan(op, cost, desc);
     }
@@ -240,18 +261,36 @@ public final class PhysicalPlanner {
         return sb.toString();
     }
 
-    private static boolean columnBelongsToSide(String col, LogicalPlanNode node) {
+    /** True when {@code col} ("c", "t.c", "alias.c") is produced by a scan under {@code node}. */
+    public static boolean columnBelongsToSide(String col, LogicalPlanNode node) {
         if (col == null) return false;
-        if (col.contains(".")) {
-            String prefix = col.substring(0, col.indexOf('.'));
-            String shortName = col.substring(col.indexOf('.') + 1);
-            String table = findTableName(node);
-            if (table != null) {
-                return table.equalsIgnoreCase(prefix);
+        int dot = col.indexOf('.');
+        for (LogicalScan scan : scans(node)) {
+            String name = scan.alias().orElse(scan.tableName());
+            if (dot > 0) {
+                if (name.equalsIgnoreCase(col.substring(0, dot)) && scan.getSchema().hasColumn(col.substring(dot + 1))) return true;
+            } else if (scan.getSchema().hasColumn(col)) {
+                return true;
             }
-            return node.getSchema().hasColumn(col) || node.getSchema().hasColumn(shortName);
         }
-        return node.getSchema().hasColumn(col);
+        return false;
+    }
+
+    /** Names rows of the scans under {@code node} are qualified with (alias or table name). */
+    public static List<String> sourceNames(LogicalPlanNode node) {
+        List<String> names = new ArrayList<>();
+        for (LogicalScan scan : scans(node)) names.add(scan.alias().orElse(scan.tableName()));
+        return names;
+    }
+
+    public static List<LogicalScan> scans(LogicalPlanNode node) {
+        List<LogicalScan> out = new ArrayList<>();
+        if (node instanceof LogicalScan s) {
+            out.add(s);
+        } else {
+            for (LogicalPlanNode c : node.getChildren()) out.addAll(scans(c));
+        }
+        return out;
     }
 
     private static String findTableName(LogicalPlanNode node) {

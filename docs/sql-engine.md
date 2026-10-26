@@ -82,7 +82,7 @@ will refuse to compile until every `switch` is updated.
 |---|---|
 | Hand-written parser | Maximum learning; auditable; no code generation |
 | Sealed interfaces + records | Exhaustive switches; compiler-enforced correctness; immutable |
-| AND-structural WHERE clause | Keeps the evaluator simple; OR/NOT deferred |
+| Top-level AND kept as a list of conjuncts | Predicate pushdown and index selection work per conjunct; each conjunct is a full expression tree (OR, NOT, IN, ...) |
 | Single-pass Lexer | Simple, fast, no memory overhead |
 | Separate Lexer/Parser phases | Easier to test each independently |
 
@@ -169,3 +169,70 @@ All of these are explicitly planned for later milestones.
 - `ExpressionEvaluatorTest` — all 6 operators × all 5 types, numeric promotion, null handling
 - `InMemoryCatalogTest` — full CRUD lifecycle for databases and tables
 - `ExecutorIntegrationTest` — end-to-end SQL execution for all DML/DDL operations
+
+
+---
+
+## 7. Current SQL support
+
+The grammar above is the Milestone 1 starting point. The engine now accepts:
+
+```ebnf
+statement     ::= select | insert | update | delete | truncate
+                | create_db | drop_db | use_db | create_table | drop_table | alter_table
+                | create_index | drop_index | explain | begin | commit | rollback
+                | SHOW TABLES | SHOW DATABASES | (DESCRIBE | DESC) table
+
+select        ::= SELECT [DISTINCT] ('*' | item (',' item)*)
+                  [FROM table [[AS] alias] join*]
+                  [WHERE expr] [GROUP BY column (',' column)*] [HAVING expr]
+                  [ORDER BY (column | alias | aggregate) [ASC | DESC], ...] [LIMIT n [OFFSET m]]
+item          ::= expr [[AS] alias] | aggregate [[AS] alias]
+join          ::= [INNER | LEFT [OUTER]] JOIN table [[AS] alias] ON expr
+aggregate     ::= COUNT '(' ('*' | column) ')' | (SUM | AVG | MIN | MAX) '(' column ')'
+
+insert        ::= INSERT INTO table ['(' column (',' column)* ')']
+                  VALUES '(' literal, ... ')' (',' '(' literal, ... ')')*
+update        ::= UPDATE table SET column '=' expr (',' column '=' expr)* [WHERE expr]
+truncate      ::= TRUNCATE [TABLE] table
+
+create_table  ::= CREATE TABLE [IF NOT EXISTS] table '(' element (',' element)* ')'
+element       ::= column type [NOT NULL | NULL] [PRIMARY KEY] [UNIQUE]
+                | PRIMARY KEY '(' column ')' | UNIQUE '(' column ')'
+alter_table   ::= ALTER TABLE table ADD [COLUMN] column type [NOT NULL]
+drop_table    ::= DROP TABLE [IF EXISTS] table
+create_index  ::= CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table '(' column ')'
+
+expr          ::= expr OR expr | expr AND expr | NOT expr
+                | value (= | != | <> | < | > | <= | >=) value
+                | value [NOT] IN '(' (expr, ... | select) ')'
+                | value [NOT] BETWEEN value AND value
+                | value [NOT] LIKE value            -- % any sequence, _ one character, case-sensitive
+                | value IS [NOT] NULL
+                | EXISTS '(' select ')'
+value         ::= value (+ | - | * | / | %) value | '-' value | literal | column | table.column
+                | '(' expr ')' | '(' select ')'       -- scalar subquery: at most one row, one column
+identifier    ::= name | "quoted name"
+```
+
+Semantics:
+
+- **NULL** follows SQL three-valued logic: comparisons with NULL are UNKNOWN, and WHERE / ON / HAVING keep a
+  row only when the condition is TRUE. `x IN (1, NULL)` is UNKNOWN when x is not 1, and `x NOT IN (empty)` is TRUE.
+- **Arithmetic:** INT op INT stays INT when it fits (otherwise BIGINT), and anything involving DOUBLE is
+  DOUBLE. Integer division truncates toward zero. Division by zero and BIGINT overflow are errors.
+- **Subqueries** are uncorrelated: each runs once, before the outer query, in the same transaction.
+  A subquery that refers to an outer column fails with "column does not exist".
+- **GROUP BY:** a selected column that is neither grouped nor aggregated is an error. HAVING may use
+  aggregates that are not in the select list.
+- **PRIMARY KEY** = NOT NULL + a unique index named `<table>_pkey`. **UNIQUE** = a unique index
+  `<table>_<column>_key` (several NULLs are allowed). Composite keys are not supported.
+- **ALTER TABLE ADD COLUMN** does not rewrite the table. Rows written before it read NULL for the new
+  column, and rows written after it store their column count in the record. A NOT NULL column can only
+  be added to an empty table, and ALTER TABLE is replicated to replicas.
+- **TRUNCATE** deletes every row like `DELETE` without WHERE: it is transactional and can be rolled back.
+
+Still not supported: OUTER joins other than LEFT (RIGHT/FULL), correlated subqueries, expressions or
+functions inside aggregates (`SUM(a * b)`), computed select items in aggregate queries, multi-column
+indexes and keys, `ALTER TABLE` other than `ADD COLUMN`, `DEFAULT` values, `INSERT ... SELECT`, and
+`LIKE ... ESCAPE`.

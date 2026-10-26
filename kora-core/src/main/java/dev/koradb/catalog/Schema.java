@@ -11,10 +11,32 @@ import java.util.List;
  *
  * @param columns ordered column definitions; immutable after creation
  */
-public record Schema(List<ColumnDef> columns) {
+public record Schema(List<ColumnDef> columns, int storedColumnCount) {
 
+    /**
+     * @param storedColumnCount number of columns in records written without a column count: the
+     *                          table's column count before its first ALTER TABLE ADD COLUMN
+     *                          (equal to {@code columns.size()} for a table never altered)
+     */
     public Schema {
         columns = List.copyOf(columns);
+        if (storedColumnCount <= 0 || storedColumnCount > columns.size()) storedColumnCount = columns.size();
+    }
+
+    public Schema(List<ColumnDef> columns) {
+        this(columns, columns.size());
+    }
+
+    /** True after ALTER TABLE ADD COLUMN: new records carry their column count. */
+    public boolean altered() {
+        return storedColumnCount < columns.size();
+    }
+
+    /** This schema with {@code column} added at the end (ALTER TABLE ADD COLUMN). */
+    public Schema withColumn(ColumnDef column) {
+        List<ColumnDef> cols = new java.util.ArrayList<>(columns);
+        cols.add(column);
+        return new Schema(cols, storedColumnCount);
     }
 
     /**

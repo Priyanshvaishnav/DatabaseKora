@@ -2,6 +2,7 @@ package dev.koradb.planner.cost;
 
 import dev.koradb.catalog.TableStatistics;
 import dev.koradb.sql.ast.BinaryExpr;
+import dev.koradb.sql.ast.Expression;
 import dev.koradb.sql.ast.ColumnRefExpr;
 import dev.koradb.sql.ast.Operator;
 
@@ -28,9 +29,16 @@ public final class CostModel {
     /**
      * Estimates selectivity (0.0 to 1.0) of a single binary comparison predicate.
      */
-    public static double estimateSelectivity(BinaryExpr pred, TableStatistics stats) {
-        if (pred == null) {
+    public static double estimateSelectivity(Expression expr, TableStatistics stats) {
+        if (expr == null) {
             return 1.0;
+        }
+        if (!(expr instanceof BinaryExpr pred) || !pred.operator().isComparison()) {
+            if (expr instanceof BinaryExpr or && or.operator() == Operator.OR) {
+                double a = estimateSelectivity(or.left(), stats), b = estimateSelectivity(or.right(), stats);
+                return Math.min(1.0, a + b - a * b);
+            }
+            return 0.5;     // IN, LIKE, BETWEEN, NOT, IS NULL ...: no statistics, a neutral guess
         }
 
         String colName = null;
@@ -56,12 +64,12 @@ public final class CostModel {
     /**
      * Estimates joint selectivity of a conjunction of independent predicates.
      */
-    public static double estimateConjunctionSelectivity(List<BinaryExpr> predicates, TableStatistics stats) {
+    public static double estimateConjunctionSelectivity(List<Expression> predicates, TableStatistics stats) {
         if (predicates == null || predicates.isEmpty()) {
             return 1.0;
         }
         double sel = 1.0;
-        for (BinaryExpr pred : predicates) {
+        for (Expression pred : predicates) {
             sel *= estimateSelectivity(pred, stats);
         }
         return Math.max(0.0001, sel);

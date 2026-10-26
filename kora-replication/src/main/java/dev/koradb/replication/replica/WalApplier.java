@@ -4,6 +4,7 @@ import dev.koradb.buffer.BufferFrame;
 import dev.koradb.catalog.Catalog;
 import dev.koradb.catalog.Schema;
 import dev.koradb.catalog.Table;
+import dev.koradb.sql.ast.AlterTableStmt;
 import dev.koradb.sql.ast.CreateTableStmt;
 import dev.koradb.sql.ast.Statement;
 import dev.koradb.sql.lexer.Lexer;
@@ -156,6 +157,13 @@ public final class WalApplier {
                     log.info("Applied DDL CREATE TABLE '{}' on replica", cts.tableName());
                 } catch (Exception e) {
                     log.debug("DDL CREATE TABLE ignored or already exists: {}", e.getMessage());
+                }
+            } else if (stmt instanceof AlterTableStmt alter) {
+                try {
+                    catalog.addColumn(alter.tableName(), alter.addColumn());
+                    log.info("Applied DDL ALTER TABLE '{}' ADD COLUMN '{}' on replica", alter.tableName(), alter.addColumn().name());
+                } catch (Exception e) {
+                    log.debug("DDL ALTER TABLE ignored: {}", e.getMessage());
                 }
             }
         } catch (Exception e) {

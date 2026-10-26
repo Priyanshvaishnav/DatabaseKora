@@ -28,7 +28,7 @@ public class IndexScanOperator implements Operator {
     private final boolean lowInclusive;
     private final boolean highInclusive;
     private final Schema schema;
-    private final String tableName;
+    private String tableName;      // qualifier of output rows: the alias, or the table name
 
     private List<RecordId> rids;
     private int cursor = 0;
@@ -45,6 +45,12 @@ public class IndexScanOperator implements Operator {
         this.highInclusive = highInclusive;
         this.schema = table.getSchema();
         this.tableName = table.getName();
+    }
+
+    /** Qualifies output rows with {@code name} (a table alias) instead of the table name. */
+    public IndexScanOperator qualifiedAs(String name) {
+        if (name != null) this.tableName = name;
+        return this;
     }
 
     /** Helper for exact point lookups (WHERE col = val). */

@@ -44,10 +44,10 @@ public final class TableFile implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(TableFile.class);
 
     private final String           tableName;
-    private final Schema           schema;
+    private volatile Schema           schema;
     private final BufferPool       bufferPool;
     private final DiskPageManager  diskManager;
-    private final RecordSerializer serializer;
+    private volatile RecordSerializer serializer;
     private final Path             filePath;
 
     /**
@@ -103,6 +103,19 @@ public final class TableFile implements AutoCloseable {
     public TableFile(Schema schema, Path filePath) {
         this(schema, filePath,
              new BufferPool(new DiskPageManager(filePath)));
+    }
+
+    /**
+     * Switches to {@code newSchema} (ALTER TABLE ADD COLUMN). Existing records are not rewritten:
+     * they are read with the old column count and get NULL for the added columns.
+     */
+    public void alterSchema(Schema newSchema) {
+        writeLocked(() -> {
+            this.schema = newSchema;
+            this.serializer = new RecordSerializer(newSchema);
+            modCount.incrementAndGet();
+            return null;
+        });
     }
 
     /** Returns the schema associated with this table file. */

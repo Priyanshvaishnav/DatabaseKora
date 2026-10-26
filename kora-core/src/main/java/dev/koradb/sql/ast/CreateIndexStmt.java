@@ -8,7 +8,7 @@ package dev.koradb.sql.ast;
  * @param columnName name of the column indexed
  * @param unique     true if duplicate keys are prohibited
  */
-public record CreateIndexStmt(String indexName, String tableName, String columnName, boolean unique)
+public record CreateIndexStmt(String indexName, String tableName, String columnName, boolean unique, boolean ifNotExists)
         implements Statement {
 
     public CreateIndexStmt {
@@ -21,5 +21,9 @@ public record CreateIndexStmt(String indexName, String tableName, String columnN
         if (columnName == null || columnName.isBlank()) {
             throw new IllegalArgumentException("Column name must not be blank");
         }
+    }
+
+    public CreateIndexStmt(String indexName, String tableName, String columnName, boolean unique) {
+        this(indexName, tableName, columnName, unique, false);
     }
 }

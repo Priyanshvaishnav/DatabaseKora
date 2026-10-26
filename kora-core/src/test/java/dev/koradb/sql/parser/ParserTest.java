@@ -273,7 +273,7 @@ class ParserTest {
             assertThat(s.where()).isPresent();
             WhereClause where = s.where().get();
             assertThat(where.predicates()).hasSize(1);
-            BinaryExpr pred = where.predicates().get(0);
+            BinaryExpr pred = (BinaryExpr) where.predicates().get(0);
             assertThat(((ColumnRefExpr) pred.left()).columnName()).isEqualTo("age");
             assertThat(pred.operator()).isEqualTo(Operator.GT);
             assertThat(((LiteralExpr) pred.right()).value()).isEqualTo(20);
@@ -287,12 +287,12 @@ class ParserTest {
             WhereClause where = s.where().get();
             assertThat(where.predicates()).hasSize(2);
             // first predicate: age > 20
-            assertThat(((ColumnRefExpr) where.predicates().get(0).left()).columnName())
+            assertThat(((ColumnRefExpr) ((BinaryExpr) where.predicates().get(0)).left()).columnName())
                     .isEqualTo("age");
             // second predicate: active = true
-            assertThat(((ColumnRefExpr) where.predicates().get(1).left()).columnName())
+            assertThat(((ColumnRefExpr) ((BinaryExpr) where.predicates().get(1)).left()).columnName())
                     .isEqualTo("active");
-            assertThat(((LiteralExpr) where.predicates().get(1).right()).value())
+            assertThat(((LiteralExpr) ((BinaryExpr) where.predicates().get(1)).right()).value())
                     .isEqualTo(Boolean.TRUE);
         }
 
@@ -309,7 +309,7 @@ class ParserTest {
 
         private Operator parseWhereOperator(String op) {
             SelectStmt s = (SelectStmt) parse("SELECT * FROM t WHERE id " + op + " 1");
-            return s.where().get().predicates().get(0).operator();
+            return ((BinaryExpr) s.where().get().predicates().get(0)).operator();
         }
 
         @Test
@@ -341,9 +341,9 @@ class ParserTest {
             assertThat(s.join()).isPresent();
             JoinClause j = s.join().get();
             assertThat(j.tableName()).isEqualTo("orders");
-            assertThat(j.onCondition().operator()).isEqualTo(Operator.EQ);
-            assertThat(((ColumnRefExpr) j.onCondition().left()).columnName()).isEqualTo("users.id");
-            assertThat(((ColumnRefExpr) j.onCondition().right()).columnName()).isEqualTo("orders.user_id");
+            assertThat(((BinaryExpr) j.onCondition()).operator()).isEqualTo(Operator.EQ);
+            assertThat(((ColumnRefExpr) ((BinaryExpr) j.onCondition()).left()).columnName()).isEqualTo("users.id");
+            assertThat(((ColumnRefExpr) ((BinaryExpr) j.onCondition()).right()).columnName()).isEqualTo("orders.user_id");
         }
 
         @Test
@@ -379,7 +379,7 @@ class ParserTest {
             assertThat(s.tableName()).isEqualTo("users");
             assertThat(s.assignments()).hasSize(1);
             assertThat(s.assignments().get(0).columnName()).isEqualTo("age");
-            assertThat(s.assignments().get(0).value().value()).isEqualTo(31);
+            assertThat(((LiteralExpr) s.assignments().get(0).value()).value()).isEqualTo(31);
             assertThat(s.where()).isPresent();
         }
 
@@ -512,7 +512,7 @@ class ParserTest {
         @Test
         @DisplayName("extra tokens after statement throws ParseException")
         void extraTokens() {
-            assertThatThrownBy(() -> parse("SELECT * FROM users EXTRA_TOKEN"))
+            assertThatThrownBy(() -> parse("SELECT * FROM users u EXTRA_TOKEN"))
                     .isInstanceOf(ParseException.class)
                     .hasMessageContaining("Unexpected token");
         }

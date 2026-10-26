@@ -10,21 +10,24 @@ public final class DialectRules {
     public static final String KORADB_SQL_GUIDELINES = """
             KoraDB SQL Dialect Guidelines:
             1. Supported Statements:
-               - SELECT [columns] FROM [table] [JOIN other_table ON condition] [WHERE condition] [GROUP BY column] [ORDER BY column [ASC|DESC]] [LIMIT n [OFFSET m]];
-               - INSERT INTO [table] VALUES (val1, val2, ...);
-               - UPDATE [table] SET column = literal_value [WHERE condition];
-               - DELETE FROM [table] [WHERE condition];
-               - CREATE TABLE [table] (col1 TYPE, col2 TYPE, ...);
-               - CREATE [UNIQUE] INDEX [index_name] ON [table] (column);
-               - DROP TABLE [table];
-               - DROP INDEX [index_name];
+               - SELECT [DISTINCT] columns|expressions FROM table [alias] [[LEFT] JOIN other [alias] ON condition]...
+                 [WHERE condition] [GROUP BY col, ...] [HAVING condition] [ORDER BY col|alias [ASC|DESC], ...] [LIMIT n [OFFSET m]];
+               - INSERT INTO table [(col, ...)] VALUES (val, ...)[, (val, ...)];
+               - UPDATE table SET column = expression [, ...] [WHERE condition];
+               - DELETE FROM table [WHERE condition];  TRUNCATE TABLE table;
+               - CREATE TABLE [IF NOT EXISTS] table (col TYPE [NOT NULL] [PRIMARY KEY] [UNIQUE], ...);
+               - ALTER TABLE table ADD COLUMN col TYPE;
+               - CREATE [UNIQUE] INDEX name ON table (column);  DROP TABLE [IF EXISTS] table;  DROP INDEX name;
 
-            2. Grammar & Syntax Restrictions:
-               - DO NOT use table aliases (e.g., 'FROM users u' is NOT supported; write 'FROM users JOIN orders ON users.id = orders.user_id').
-               - UPDATE statements require literal values in assignments (e.g., 'SET balance = 1500.0', NOT expressions like 'SET balance = balance + 10').
-               - String literals MUST use single quotes ('example').
+            2. Grammar & Syntax:
+               - Conditions: =, != or <>, <, >, <=, >=, AND, OR, NOT, IN (...), BETWEEN a AND b, LIKE 'pattern', IS [NOT] NULL.
+               - Arithmetic: + - * / % on numbers.
+               - Subqueries: (SELECT ...) as a single value, x IN (SELECT ...), EXISTS (SELECT ...); they must not refer to outer tables.
+               - String literals MUST use single quotes ('example'); identifiers may be double-quoted ("order").
                - Supported Data Types: INT, BIGINT, BOOLEAN, VARCHAR, DOUBLE, TIMESTAMP.
-               - Supported Aggregate Functions: COUNT(*), COUNT(col), SUM(col), AVG(col), MIN(col), MAX(col).
+               - Supported Aggregate Functions: COUNT(*), COUNT(col), SUM(col), AVG(col), MIN(col), MAX(col) (on plain columns).
+               - No other functions (no LOWER, COALESCE, NOW, CAST ...), no RIGHT/FULL joins, no INSERT ... SELECT.
                - Every statement should terminate with a semicolon ';'.
             """;
+
 }

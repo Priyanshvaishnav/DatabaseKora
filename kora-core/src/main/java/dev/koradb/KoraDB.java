@@ -459,7 +459,8 @@ public final class KoraDB implements AutoCloseable {
     private static boolean isDdl(Statement s) {
         return s instanceof dev.koradb.sql.ast.CreateTableStmt || s instanceof dev.koradb.sql.ast.DropTableStmt
                 || s instanceof dev.koradb.sql.ast.CreateIndexStmt || s instanceof dev.koradb.sql.ast.DropIndexStmt
-                || s instanceof dev.koradb.sql.ast.CreateDatabaseStmt || s instanceof dev.koradb.sql.ast.DropDatabaseStmt;
+                || s instanceof dev.koradb.sql.ast.CreateDatabaseStmt || s instanceof dev.koradb.sql.ast.DropDatabaseStmt
+                || s instanceof dev.koradb.sql.ast.AlterTableStmt;
     }
 
     public Catalog getCatalog() {

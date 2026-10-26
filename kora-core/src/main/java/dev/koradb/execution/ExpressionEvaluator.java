@@ -9,36 +9,29 @@ import dev.koradb.sql.ast.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 /**
- * Evaluates {@link Expression} nodes against a {@link Row}.
+ * Evaluates expressions against a row with SQL semantics.
  *
- * <h2>Supported expressions in Milestone 1</h2>
- * <ul>
- *   <li>{@link BinaryExpr} — comparison of a column value against a literal</li>
- *   <li>{@link LiteralExpr} — a constant value</li>
- *   <li>{@link ColumnRefExpr} — reads a value from the current row</li>
- * </ul>
+ * <p>Boolean results use three-valued logic: {@code null} means UNKNOWN. Any comparison or
+ * arithmetic with NULL is UNKNOWN; {@code NOT UNKNOWN} is UNKNOWN; {@code FALSE AND UNKNOWN} is
+ * FALSE and {@code TRUE OR UNKNOWN} is TRUE. A WHERE / ON / HAVING condition keeps a row only when
+ * it is TRUE ({@link #evaluate}).
  *
- * <h2>Type coercion rules</h2>
- * <ul>
- *   <li>Numeric types: INT and DOUBLE can be compared (int is promoted to double).</li>
- *   <li>BIGINT and INT can be compared (int is promoted to long).</li>
- *   <li>TIMESTAMP strings are parsed when the schema column type is TIMESTAMP.</li>
- *   <li>All other type mismatches throw {@link ExecutionException}.</li>
- * </ul>
+ * <p>Subqueries must be resolved to values before evaluation (see {@code SubqueryResolver}).
  */
 public final class ExpressionEvaluator {
 
     private static final DateTimeFormatter TIMESTAMP_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
+    private static final Map<String, Pattern> LIKE_CACHE = new ConcurrentHashMap<>();
+
     private final Schema schema;
 
-    /**
-     * @param schema the schema of the table being queried,
-     *               used to resolve column types for type checking
-     */
     public ExpressionEvaluator(Schema schema) {
         this.schema = schema;
     }
@@ -47,32 +40,32 @@ public final class ExpressionEvaluator {
     // Public API
     // =========================================================================
 
-    /**
-     * Evaluates a {@link BinaryExpr} predicate against a row.
-     *
-     * @param expr the predicate to evaluate
-     * @param row  the row to evaluate it against
-     * @return true if the predicate is satisfied by this row
-     * @throws ExecutionException on type mismatch or unknown column
-     */
-    public boolean evaluate(BinaryExpr expr, Row row) {
-        Object leftVal  = resolveLeft(expr.left(), row);
-        Object rightVal = resolveRight(expr.right(), expr.left(), row);
-
-        return compare(leftVal, rightVal, expr.operator());
+    /** True only when the condition is TRUE for {@code row} (FALSE and UNKNOWN both reject). */
+    public boolean evaluate(Expression condition, Row row) {
+        Object v = eval(condition, row);
+        if (v == null) return false;
+        if (v instanceof Boolean b) return b;
+        throw new ExecutionException("Condition is not boolean: " + condition + " evaluated to " + v);
     }
 
-    /**
-     * Resolves a literal value, applying TIMESTAMP parsing if the target
-     * column's type is TIMESTAMP.
-     *
-     * @param literal    the literal to resolve
-     * @param columnName the name of the target column (for type lookup)
-     */
+    /** Value of {@code expr} for {@code row}: a column value, constant, Boolean, number or null. */
+    public Object eval(Expression expr, Row row) {
+        return switch (expr) {
+            case LiteralExpr lit -> lit.value();
+            case ColumnRefExpr ref -> resolveColumnValue(ref.columnName(), row);
+            case AggregateExpr agg -> aggregateValue(agg, row);
+            case UnaryExpr u -> evalUnary(u, row);
+            case BinaryExpr b -> evalBinary(b, row);
+            case InExpr in -> evalIn(in, row);
+            case BetweenExpr bt -> evalBetween(bt, row);
+            case SubqueryExpr sq -> throw new ExecutionException("Subquery was not resolved before execution");
+        };
+    }
+
     public Object resolveLiteral(LiteralExpr literal, String columnName) {
         Object raw = literal.value();
-        if (raw instanceof String s) {
-            ColumnDef col = schema.findColumn(columnName);
+        if (raw instanceof String s && schema != null) {
+            var col = schema.findColumn(columnName);
             if (col != null && col.dataType() == DataType.TIMESTAMP) {
                 return parseTimestamp(s);
             }
@@ -81,98 +74,98 @@ public final class ExpressionEvaluator {
     }
 
     // =========================================================================
-    // Private helpers
+    // Operators
     // =========================================================================
 
-    private Object resolveLeft(Expression left, Row row) {
-        if (left instanceof ColumnRefExpr ref) {
-            return resolveColumnValue(ref.columnName(), row);
-        }
-        if (left instanceof LiteralExpr lit) {
-            return lit.value();
-        }
-        throw new ExecutionException("Unsupported left-hand expression: " + left.getClass().getSimpleName());
-    }
-
-    private Object resolveRight(Expression right, Expression left, Row row) {
-        if (right instanceof LiteralExpr lit) {
-            // If left is a column reference, check if we need TIMESTAMP parsing
-            if (left instanceof ColumnRefExpr ref) {
-                return resolveLiteral(lit, ref.columnName());
-            }
-            return lit.value();
-        }
-        if (right instanceof ColumnRefExpr ref) {
-            return resolveColumnValue(ref.columnName(), row);
-        }
-        throw new ExecutionException("Unsupported right-hand expression: " + right.getClass().getSimpleName());
-    }
-
-    private Object resolveColumnValue(String colName, Row row) {
-        if (schema != null && schema.hasColumn(colName)) {
-            Object val = row.get(colName);
-            if (val != null) return val;
-        }
-        if (colName.contains(".")) {
-            String shortName = colName.substring(colName.indexOf('.') + 1);
-            if (schema != null && schema.hasColumn(shortName)) {
-                Object val = row.get(shortName);
-                if (val != null) return val;
-            }
-        }
-
-        Object direct = row.get(colName);
-        if (direct != null) return direct;
-        if (colName.contains(".")) {
-            String shortName = colName.substring(colName.indexOf('.') + 1);
-            Object shortVal = row.get(shortName);
-            if (shortVal != null) return shortVal;
-        } else {
-            for (java.util.Map.Entry<String, Object> entry : row.values().entrySet()) {
-                if (entry.getKey().endsWith("." + colName)) {
-                    return entry.getValue();
+    private Object evalUnary(UnaryExpr u, Row row) {
+        Object v = eval(u.operand(), row);
+        return switch (u.kind()) {
+            case IS_NULL -> v == null;
+            case IS_NOT_NULL -> v != null;
+            case NOT -> v == null ? null : !asBoolean(v, u);
+            case NEGATE -> {
+                if (v == null) yield null;
+                if (v instanceof Integer i) {
+                    // (not a ?: expression: that would promote every result to long)
+                    if (i == Integer.MIN_VALUE) yield -(long) i;
+                    yield -i;
                 }
+                if (v instanceof Long l) yield Math.negateExact(l);
+                if (v instanceof Double d) yield -d;
+                throw new ExecutionException("Cannot negate " + typeName(v) + " value " + v);
             }
-        }
-
-        if (schema != null && !schema.hasColumn(colName) && (!colName.contains(".") || !schema.hasColumn(colName.substring(colName.indexOf('.') + 1)))) {
-            throw new SchemaException("Column '%s' does not exist".formatted(colName));
-        }
-        return row.get(colName);
+        };
     }
 
-    /**
-     * Compares two values using the given operator.
-     *
-     * <p>Null handling: any comparison involving null returns false (SQL NULL semantics).
-     */
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private boolean compare(Object left, Object right, Operator op) {
-        // SQL NULL semantics: any comparison with null → false
-        if (left == null || right == null) return false;
-
-        // Numeric promotion
-        Object[] promoted = promoteNumerics(left, right);
-        left  = promoted[0];
-        right = promoted[1];
-
-        if (!(left instanceof Comparable) || !(right instanceof Comparable)) {
-            throw new ExecutionException(
-                    "Cannot compare values of types %s and %s"
-                            .formatted(left.getClass().getSimpleName(),
-                                       right.getClass().getSimpleName()));
+    private Object evalBinary(BinaryExpr b, Row row) {
+        Operator op = b.operator();
+        if (op == Operator.AND) {
+            Object l = eval(b.left(), row);
+            if (Boolean.FALSE.equals(l)) return false;           // short-circuit
+            Object r = eval(b.right(), row);
+            if (Boolean.FALSE.equals(r)) return false;
+            if (l == null || r == null) return null;
+            return asBoolean(l, b) && asBoolean(r, b);
+        }
+        if (op == Operator.OR) {
+            Object l = eval(b.left(), row);
+            if (Boolean.TRUE.equals(l)) return true;
+            Object r = eval(b.right(), row);
+            if (Boolean.TRUE.equals(r)) return true;
+            if (l == null || r == null) return null;
+            return asBoolean(l, b) || asBoolean(r, b);
         }
 
-        // Ensure both sides are the same type after promotion
-        if (!left.getClass().equals(right.getClass())) {
-            throw new ExecutionException(
-                    "Type mismatch: cannot compare %s (%s) with %s (%s)"
-                            .formatted(left, left.getClass().getSimpleName(),
-                                       right, right.getClass().getSimpleName()));
+        Object left = eval(b.left(), row);
+        Object right = eval(b.right(), row);
+        if (left == null || right == null) return null;
+
+        if (op.isArithmetic()) return arithmetic(left, right, op);
+        if (op == Operator.LIKE || op == Operator.NOT_LIKE) {
+            boolean m = like(String.valueOf(left), String.valueOf(right));
+            return op == Operator.LIKE ? m : !m;
         }
+        return compareOp(left, right, op);
+    }
 
-        int cmp = ((Comparable) left).compareTo(right);
+    private Object evalIn(InExpr in, Row row) {
+        if (in.list() == null) throw new ExecutionException("IN subquery was not resolved before execution");
+        if (in.list().isEmpty()) return in.negated();   // x IN () is FALSE and x NOT IN () TRUE, even for NULL x
+        Object v = eval(in.operand(), row);
+        if (v == null) return null;
+        boolean sawNull = false;
+        for (Expression e : in.list()) {
+            Object item = eval(e, row);
+            if (item == null) {
+                sawNull = true;
+            } else if (compare(v, item) == 0) {
+                return !in.negated();
+            }
+        }
+        if (sawNull) return null;            // x IN (1, NULL) is UNKNOWN when x is not 1
+        return in.negated();
+    }
 
+    private Object evalBetween(BetweenExpr bt, Row row) {
+        Object v = eval(bt.operand(), row);
+        Object lo = eval(bt.low(), row);
+        Object hi = eval(bt.high(), row);
+        Boolean geLow = v == null || lo == null ? null : compare(v, lo) >= 0;
+        Boolean leHigh = v == null || hi == null ? null : compare(v, hi) <= 0;
+        Boolean result;
+        if (Boolean.FALSE.equals(geLow) || Boolean.FALSE.equals(leHigh)) result = false;
+        else if (geLow == null || leHigh == null) result = null;
+        else result = true;
+        return result == null ? null : (bt.negated() ? !result : result);
+    }
+
+    private Object aggregateValue(AggregateExpr agg, Row row) {
+        if (row.hasKey(agg.key())) return row.get(agg.key());
+        throw new ExecutionException("Aggregate " + agg.key() + " can only be used in HAVING or with GROUP BY");
+    }
+
+    private boolean compareOp(Object left, Object right, Operator op) {
+        int cmp = compare(left, right);
         return switch (op) {
             case EQ  -> cmp == 0;
             case NEQ -> cmp != 0;
@@ -180,39 +173,157 @@ public final class ExpressionEvaluator {
             case GT  -> cmp >  0;
             case LTE -> cmp <= 0;
             case GTE -> cmp >= 0;
+            default  -> throw new ExecutionException("Not a comparison operator: " + op.symbol());
         };
     }
 
-    /**
-     * Promotes numeric types so INT vs DOUBLE and INT vs LONG comparisons work.
-     *
-     * <ul>
-     *   <li>INT + DOUBLE  → both become DOUBLE</li>
-     *   <li>INT + LONG    → both become LONG</li>
-     *   <li>LONG + DOUBLE → both become DOUBLE</li>
-     *   <li>Anything else → unchanged (type mismatch will be caught above)</li>
-     * </ul>
-     */
-    private Object[] promoteNumerics(Object left, Object right) {
-        if (left instanceof Integer l && right instanceof Double r) {
-            return new Object[]{l.doubleValue(), r};
+    /** Compares two non-null values after numeric promotion and string-to-timestamp conversion. */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    int compare(Object left, Object right) {
+        if (left instanceof LocalDateTime && right instanceof String s) right = parseTimestamp(s);
+        if (right instanceof LocalDateTime && left instanceof String s) left = parseTimestamp(s);
+        if (left instanceof Number l && right instanceof Number r && left.getClass() != right.getClass()) {
+            if (l instanceof Double || r instanceof Double) {
+                return Double.compare(l.doubleValue(), r.doubleValue());
+            }
+            return Long.compare(l.longValue(), r.longValue());
         }
-        if (left instanceof Double l && right instanceof Integer r) {
-            return new Object[]{l, r.doubleValue()};
+        if (!(left instanceof Comparable) || !(right instanceof Comparable)) {
+            throw new ExecutionException("Cannot compare values of types %s and %s"
+                    .formatted(typeName(left), typeName(right)));
         }
-        if (left instanceof Integer l && right instanceof Long r) {
-            return new Object[]{l.longValue(), r};
+        if (!left.getClass().equals(right.getClass())) {
+            throw new ExecutionException("Type mismatch: cannot compare %s (%s) with %s (%s)"
+                    .formatted(left, typeName(left), right, typeName(right)));
         }
-        if (left instanceof Long l && right instanceof Integer r) {
-            return new Object[]{l, r.longValue()};
+        return ((Comparable) left).compareTo(right);
+    }
+
+    private static Object arithmetic(Object left, Object right, Operator op) {
+        if (!(left instanceof Number l) || !(right instanceof Number r)) {
+            throw new ExecutionException("Operator %s needs numbers but got %s and %s"
+                    .formatted(op.symbol(), typeName(left), typeName(right)));
         }
-        if (left instanceof Long l && right instanceof Double r) {
-            return new Object[]{l.doubleValue(), r};
+        if (l instanceof Double || r instanceof Double) {
+            double a = l.doubleValue(), b = r.doubleValue();
+            return switch (op) {
+                case ADD -> a + b;
+                case SUB -> a - b;
+                case MUL -> a * b;
+                case DIV -> {
+                    if (b == 0) throw new ExecutionException("Division by zero");
+                    yield a / b;
+                }
+                case MOD -> {
+                    if (b == 0) throw new ExecutionException("Division by zero");
+                    yield a % b;
+                }
+                default -> throw new IllegalStateException(op.name());
+            };
         }
-        if (left instanceof Double l && right instanceof Long r) {
-            return new Object[]{l, r.doubleValue()};
+        long a = l.longValue(), b = r.longValue();
+        long res;
+        try {
+            res = switch (op) {
+                case ADD -> Math.addExact(a, b);
+                case SUB -> Math.subtractExact(a, b);
+                case MUL -> Math.multiplyExact(a, b);
+                case DIV -> {
+                    if (b == 0) throw new ExecutionException("Division by zero");
+                    yield a / b;                     // integer division truncates toward zero
+                }
+                case MOD -> {
+                    if (b == 0) throw new ExecutionException("Division by zero");
+                    yield a % b;
+                }
+                default -> throw new IllegalStateException(op.name());
+            };
+        } catch (ArithmeticException overflow) {
+            throw new ExecutionException("Integer overflow in " + a + " " + op.symbol() + " " + b);
         }
-        return new Object[]{left, right};
+        // INT op INT stays INT when it fits; anything involving BIGINT (or overflowing INT) is BIGINT
+        if (l instanceof Integer && r instanceof Integer && res >= Integer.MIN_VALUE && res <= Integer.MAX_VALUE) {
+            return (int) res;
+        }
+        return res;
+    }
+
+    /** SQL LIKE: {@code %} matches any sequence, {@code _} one character; case-sensitive. */
+    static boolean like(String value, String pattern) {
+        Pattern p = LIKE_CACHE.computeIfAbsent(pattern, ExpressionEvaluator::likeToRegex);
+        return p.matcher(value).matches();
+    }
+
+    private static Pattern likeToRegex(String pattern) {
+        StringBuilder re = new StringBuilder();
+        StringBuilder literal = new StringBuilder();
+        for (char c : pattern.toCharArray()) {
+            if (c == '%' || c == '_') {
+                if (literal.length() > 0) {
+                    re.append(Pattern.quote(literal.toString()));
+                    literal.setLength(0);
+                }
+                re.append(c == '%' ? ".*" : ".");
+            } else {
+                literal.append(c);
+            }
+        }
+        if (literal.length() > 0) re.append(Pattern.quote(literal.toString()));
+        return Pattern.compile(re.toString(), Pattern.DOTALL);
+    }
+
+    private static boolean asBoolean(Object v, Expression context) {
+        if (v instanceof Boolean b) return b;
+        throw new ExecutionException("Expected a boolean in " + context + " but got " + typeName(v) + " " + v);
+    }
+
+    private static String typeName(Object v) {
+        return v == null ? "NULL" : switch (v) {
+            case Integer i -> "INT";
+            case Long l -> "BIGINT";
+            case Double d -> "DOUBLE";
+            case String s -> "VARCHAR";
+            case Boolean b -> "BOOLEAN";
+            case LocalDateTime t -> "TIMESTAMP";
+            default -> v.getClass().getSimpleName();
+        };
+    }
+
+    // =========================================================================
+    // Column resolution
+    // =========================================================================
+
+    private Object resolveColumnValue(String colName, Row row) {
+        if (row.hasKey(colName)) {
+            return row.get(colName);
+        }
+        int dot = colName.indexOf('.');
+        if (dot > 0) {
+            String qualifier = colName.substring(0, dot);
+            String shortName = colName.substring(dot + 1);
+            // rows not qualified with this name (e.g. in-memory rows): the short name is unambiguous
+            boolean qualifiedKeys = row.values().keySet().stream().anyMatch(k -> k.regionMatches(true, 0, qualifier + ".", 0, qualifier.length() + 1));
+            if (!qualifiedKeys && row.hasKey(shortName)) {
+                return row.get(shortName);
+            }
+        } else {
+            for (Map.Entry<String, Object> entry : row.values().entrySet()) {
+                String k = entry.getKey();
+                if (k.length() > colName.length() && k.regionMatches(true, k.length() - colName.length() - 1, "." + colName, 0, colName.length() + 1)) {
+                    return entry.getValue();
+                }
+            }
+        }
+        if (schema == null || !hasColumn(colName)) {
+            throw new SchemaException("Column '%s' does not exist".formatted(colName));
+        }
+        return null;
+    }
+
+    private boolean hasColumn(String colName) {
+        if (schema.hasColumn(colName)) return true;
+        int dot = colName.indexOf('.');
+        return dot > 0 && schema.hasColumn(colName.substring(dot + 1));
     }
 
     private LocalDateTime parseTimestamp(String s) {

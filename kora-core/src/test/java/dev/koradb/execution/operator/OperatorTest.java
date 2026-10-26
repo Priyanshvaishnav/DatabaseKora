@@ -241,7 +241,7 @@ class OperatorTest {
                     SelectItem.aggregate(AggregateType.MAX, "age", "max_age")
             );
 
-            AggregateOperator agg = new AggregateOperator(scan, items, null);
+            AggregateOperator agg = new AggregateOperator(scan, items, (String) null);
             agg.open();
 
             Row result = agg.next();

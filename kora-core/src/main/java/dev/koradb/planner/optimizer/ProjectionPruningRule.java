@@ -22,7 +22,9 @@ public final class ProjectionPruningRule implements Rule {
         if (node instanceof LogicalProject project) {
             Set<String> newRequired = new HashSet<>();
             for (SelectItem item : project.projectItems()) {
-                if (!item.isAggregate()) {
+                if (item.isComputed()) {
+                    extractColumns(item.valueExpr(), newRequired);
+                } else if (!item.isAggregate()) {
                     newRequired.add(item.expression());
                 }
             }
@@ -41,21 +43,21 @@ public final class ProjectionPruningRule implements Rule {
 
         if (node instanceof LogicalAggregate agg) {
             Set<String> newRequired = new HashSet<>();
-            agg.groupBy().ifPresent(newRequired::add);
+            newRequired.addAll(agg.groupByColumns());
             for (SelectItem item : agg.selectItems()) {
-                if (item.isAggregate() && !item.expression().equals("*")) {
-                    newRequired.add(item.expression());
+                if (item.isAggregate() && !"*".equals(item.aggregateColumn())) {
+                    newRequired.add(item.aggregateColumn());
                 } else if (!item.isAggregate()) {
                     newRequired.add(item.expression());
                 }
             }
             LogicalPlanNode newChild = prune(agg.child(), newRequired, catalog);
-            return new LogicalAggregate(newChild, agg.selectItems(), agg.groupBy());
+            return new LogicalAggregate(newChild, agg.selectItems(), agg.groupByColumns());
         }
 
         if (node instanceof LogicalFilter filter) {
             Set<String> newRequired = new HashSet<>(requiredCols);
-            for (BinaryExpr pred : filter.predicates()) {
+            for (Expression pred : filter.predicates()) {
                 extractColumns(pred, newRequired);
             }
             LogicalPlanNode newChild = prune(filter.child(), newRequired, catalog);
@@ -102,7 +104,7 @@ public final class ProjectionPruningRule implements Rule {
             }
 
             // Also ensure columns needed for pushedPredicates are retained
-            for (BinaryExpr pred : scan.pushedPredicates()) {
+            for (Expression pred : scan.pushedPredicates()) {
                 List<String> predCols = new ArrayList<>();
                 extractColumns(pred, predCols);
                 for (String c : predCols) {
@@ -144,11 +146,6 @@ public final class ProjectionPruningRule implements Rule {
     }
 
     private static void extractColumns(Expression expr, Collection<String> cols) {
-        if (expr instanceof ColumnRefExpr col) {
-            cols.add(col.columnName());
-        } else if (expr instanceof BinaryExpr bin) {
-            extractColumns(bin.left(), cols);
-            extractColumns(bin.right(), cols);
-        }
+        cols.addAll(ExpressionUtils.columns(expr));
     }
 }

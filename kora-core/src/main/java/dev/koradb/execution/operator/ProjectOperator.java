@@ -22,11 +22,13 @@ public class ProjectOperator implements Operator {
     private final Operator child;
     private final List<SelectItem> selectItems;
     private final Schema schema;
+    private final dev.koradb.execution.ExpressionEvaluator evaluator;
 
     public ProjectOperator(Operator child, List<SelectItem> selectItems) {
         this.child = child;
         this.selectItems = selectItems != null ? List.copyOf(selectItems) : List.of();
         this.schema = computeSchema(child.getSchema(), this.selectItems);
+        this.evaluator = new dev.koradb.execution.ExpressionEvaluator(child.getSchema());
     }
 
     private static Schema computeSchema(Schema childSchema, List<SelectItem> items) {
@@ -35,6 +37,10 @@ public class ProjectOperator implements Operator {
         }
         List<ColumnDef> cols = new ArrayList<>();
         for (SelectItem item : items) {
+            if (item.isComputed()) {
+                cols.add(new ColumnDef(item.alias(), ExpressionTypes.typeOf(item.valueExpr(), childSchema)));
+                continue;
+            }
             String colName = item.expression();
             ColumnDef existing = childSchema.findColumn(colName);
             if (existing == null && colName.contains(".")) {
@@ -61,18 +67,16 @@ public class ProjectOperator implements Operator {
 
         Map<String, Object> projected = new LinkedHashMap<>();
         for (SelectItem item : selectItems) {
-            String colName = item.expression();
-            Object val = row.get(colName);
-            if (val == null && colName.contains(".")) {
-                val = row.get(colName.substring(colName.indexOf('.') + 1));
+            if (item.isComputed()) {
+                projected.put(item.alias(), evaluator.eval(item.valueExpr(), row));
+                continue;
             }
-            if (val == null) {
-                for (Map.Entry<String, Object> entry : row.values().entrySet()) {
-                    if (entry.getKey().endsWith("." + colName)) {
-                        val = entry.getValue();
-                        break;
-                    }
-                }
+            String colName = item.expression();
+            Object val;
+            try {
+                val = evaluator.eval(new dev.koradb.sql.ast.ColumnRefExpr(colName), row);
+            } catch (dev.koradb.exception.SchemaException unknown) {
+                val = row.get(colName);       // names produced by an operator below (aggregates)
             }
             projected.put(item.alias(), val);
             if (item.alias().contains(".")) {

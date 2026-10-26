@@ -1,7 +1,7 @@
 package dev.koradb.planner.logical;
 
 import dev.koradb.catalog.Schema;
-import dev.koradb.sql.ast.BinaryExpr;
+import dev.koradb.sql.ast.Expression;
 import dev.koradb.sql.ast.ColumnDef;
 
 import java.util.ArrayList;
@@ -15,11 +15,11 @@ public final class LogicalJoin implements LogicalPlanNode {
 
     private final LogicalPlanNode left;
     private final LogicalPlanNode right;
-    private final BinaryExpr onCondition;
+    private final Expression onCondition;
     private final JoinType joinType;
     private final Schema schema;
 
-    public LogicalJoin(LogicalPlanNode left, LogicalPlanNode right, BinaryExpr onCondition, JoinType joinType) {
+    public LogicalJoin(LogicalPlanNode left, LogicalPlanNode right, Expression onCondition, JoinType joinType) {
         this.left = Objects.requireNonNull(left);
         this.right = Objects.requireNonNull(right);
         this.onCondition = onCondition;
@@ -35,7 +35,7 @@ public final class LogicalJoin implements LogicalPlanNode {
         return right;
     }
 
-    public BinaryExpr onCondition() {
+    public Expression onCondition() {
         return onCondition;
     }
 
@@ -43,11 +43,9 @@ public final class LogicalJoin implements LogicalPlanNode {
         return joinType;
     }
 
+    /** Same naming as the join operators: a right column whose name is taken gets a "_2" suffix. */
     private static Schema computeJoinedSchema(Schema leftSchema, Schema rightSchema) {
-        List<ColumnDef> combined = new ArrayList<>();
-        combined.addAll(leftSchema.columns());
-        combined.addAll(rightSchema.columns());
-        return new Schema(combined);
+        return dev.koradb.execution.operator.JoinSupport.mergeSchemas(leftSchema, rightSchema);
     }
 
     @Override
