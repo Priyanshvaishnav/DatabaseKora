@@ -118,8 +118,18 @@ public final class ObservabilityEngine implements AutoCloseable {
         return this.bufferPoolCollector;
     }
 
+    /** Records every SQL statement executed through {@code db} in the query metrics. */
+    public void bindQueries(dev.koradb.KoraDB db) {
+        db.setQueryListener(this::recordQuery);
+    }
+
     public synchronized TransactionMetricsCollector bindTransactionManager(TransactionManager tm) {
-        this.transactionCollector = new TransactionMetricsCollector(metricsRegistry, tm);
+        TransactionMetricsCollector collector = new TransactionMetricsCollector(metricsRegistry, tm);
+        this.transactionCollector = collector;
+        tm.addOutcomeListener(new TransactionManager.OutcomeListener() {
+            @Override public void onCommit(dev.koradb.transaction.Transaction txn) { collector.recordCommit(); }
+            @Override public void onAbort(dev.koradb.transaction.Transaction txn)  { collector.recordAbort(); }
+        });
         return this.transactionCollector;
     }
 

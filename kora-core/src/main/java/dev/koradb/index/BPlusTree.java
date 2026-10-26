@@ -28,6 +28,10 @@ import java.util.Optional;
  */
 public final class BPlusTree implements Index {
 
+    /** Largest key accepted, so that a node page always holds several entries. */
+    public static final int MAX_KEY_BYTES = 1024;
+
+
     private static final Logger log = LoggerFactory.getLogger(BPlusTree.class);
     private static final byte[] MAGIC = "KORA_BPT".getBytes(StandardCharsets.US_ASCII);
 
@@ -253,6 +257,11 @@ public final class BPlusTree implements Index {
      */
     @Override
     public synchronized void insertUnchecked(IndexKey key, RecordId rid) {
+        int keyBytes = key.toBytes().length;
+        if (keyBytes > MAX_KEY_BYTES) {
+            throw new StorageException("Value is too large for index '%s': the key is %d bytes and index keys are limited to %d bytes"
+                    .formatted(name, keyBytes, MAX_KEY_BYTES));
+        }
 
         int leafPid = findLeafPageId(key);
         BufferFrame leafFrame = bufferPool.pin(leafPid);
@@ -512,6 +521,41 @@ public final class BPlusTree implements Index {
             }
             currPid = nextPid;
         }
+    }
+
+    @Override
+    public synchronized int removeEntries(java.util.Set<RecordId> rids) {
+        if (rids == null || rids.isEmpty()) return 0;
+        int removed = 0;
+        int pid = findLeftmostLeafPageId();
+        while (pid != -1) {
+            BufferFrame frame = bufferPool.pin(pid);
+            int next;
+            try {
+                BPlusTreeLeafNode leaf = BPlusTreeLeafNode.deserialize(frame.getPage(), keyType);
+                next = leaf.getNextPageId();
+                int before = leaf.getKeys().size();
+                for (int i = leaf.getKeys().size() - 1; i >= 0; i--) {
+                    if (rids.contains(leaf.getValues().get(i))) {
+                        leaf.getKeys().remove(i);
+                        leaf.getValues().remove(i);
+                    }
+                }
+                if (leaf.getKeys().size() != before) {
+                    removed += before - leaf.getKeys().size();
+                    leaf.serialize(frame.getPage());
+                    bufferPool.markDirty(frame);
+                }
+            } finally {
+                bufferPool.unpin(frame);
+            }
+            pid = next;
+        }
+        if (removed > 0) {
+            entryCount -= removed;
+            writeHeader();
+        }
+        return removed;
     }
 
     /** Descends to the leftmost leaf that can contain {@code key} (see findLeftmostChildPageId). */

@@ -424,6 +424,10 @@ public final class Parser {
             case MAX   -> aggType = AggregateType.MAX;
             default    -> {}
         }
+        // "count" without "(" is an ordinary column name
+        if (aggType != null && (current + 1 >= tokens.size() || tokens.get(current + 1).type() != LPAREN)) {
+            aggType = null;
+        }
 
         if (aggType != null) {
             advance(); // consume aggregate keyword
@@ -672,6 +676,32 @@ public final class Parser {
      */
     private LiteralExpr parseLiteral() {
         Token token = peek();
+        if (token.type() == MINUS) {
+            // Negative numeric literal: -5, -2.5, -1E3
+            advance();
+            Token num = peek();
+            return switch (num.type()) {
+                case LITERAL_INT -> {
+                    advance();
+                    yield new LiteralExpr(-Integer.parseInt(num.lexeme()));
+                }
+                case LITERAL_LONG -> {
+                    advance();
+                    long v = -Long.parseLong(num.lexeme());
+                    yield (v >= Integer.MIN_VALUE) ? new LiteralExpr((int) v) : new LiteralExpr(v);
+                }
+                case LITERAL_DOUBLE -> {
+                    advance();
+                    yield new LiteralExpr(-Double.parseDouble(num.lexeme()));
+                }
+                default -> throw new ParseException(
+                        "Expected a number after '-' but found: '" + num.lexeme() + "'", num.line());
+            };
+        }
+        if (token.type() == NULL) {
+            advance();
+            return new LiteralExpr(null);
+        }
 
         return switch (token.type()) {
             case LITERAL_INT -> {

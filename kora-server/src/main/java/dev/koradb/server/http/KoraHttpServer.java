@@ -150,6 +150,7 @@ public final class KoraHttpServer implements AutoCloseable {
         Map<String, String> queryParams = parseQueryParams(exchange.getRequestURI());
         String sql = null;
         String targetDb = queryParams.get("database");
+        boolean createRequested = Boolean.parseBoolean(queryParams.getOrDefault("create", "false"));
 
         if (body.startsWith("{")) {
             try {
@@ -161,6 +162,10 @@ public final class KoraHttpServer implements AutoCloseable {
                 Object dbVal = json.get("database");
                 if (dbVal != null && targetDb == null) {
                     targetDb = dbVal.toString().trim();
+                }
+                Object createVal = json.get("create");
+                if (createVal != null) {
+                    createRequested = Boolean.parseBoolean(createVal.toString());
                 }
             } catch (Exception e) {
                 sendJson(exchange, 400, Map.of(
@@ -199,6 +204,19 @@ public final class KoraHttpServer implements AutoCloseable {
                             "status", "error",
                             "code", "STORAGE_ERROR",
                             "error", "Cannot open database '" + targetDb + "': " + msg
+                    ));
+                    return;
+                }
+                // Create the database only when the caller clearly intends to (M9): an explicit
+                // create=true, or a CREATE statement. A query against a misspelled name must fail
+                // instead of silently creating an empty database.
+                boolean ddlIntent = sql.trim().toUpperCase(java.util.Locale.ROOT).startsWith("CREATE ");
+                if (!createRequested && !ddlIntent) {
+                    sendJson(exchange, 404, Map.of(
+                            "status", "error",
+                            "code", "DATABASE_NOT_FOUND",
+                            "error", "Database '" + targetDb + "' does not exist. Create it with CREATE DATABASE, "
+                                    + "or send create=true to create it with this request."
                     ));
                     return;
                 }

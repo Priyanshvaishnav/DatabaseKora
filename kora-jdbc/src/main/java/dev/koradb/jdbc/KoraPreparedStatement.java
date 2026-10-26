@@ -69,6 +69,19 @@ public class KoraPreparedStatement extends KoraStatement implements PreparedStat
         if (val instanceof Number || val instanceof Boolean) {
             return val.toString();
         }
+        // Dates/times: the server's TIMESTAMP format (second precision), not Timestamp.toString()
+        if (val instanceof java.sql.Timestamp ts) {
+            return "'" + ts.toLocalDateTime().withNano(0).toString().replace('T', ' ') + "'";
+        }
+        if (val instanceof java.time.LocalDateTime ldt) {
+            return "'" + ldt.withNano(0).toString().replace('T', ' ') + "'";
+        }
+        if (val instanceof java.sql.Date d) {
+            return "'" + d.toLocalDate() + " 00:00:00'";
+        }
+        if (val instanceof java.time.LocalDate ld) {
+            return "'" + ld + " 00:00:00'";
+        }
         // String / char / dates: quote and escape internal single quotes
         String str = val.toString().replace("'", "''");
         return "'" + str + "'";
@@ -146,7 +159,7 @@ public class KoraPreparedStatement extends KoraStatement implements PreparedStat
 
     @Override
     public void setDate(int parameterIndex, Date x) throws SQLException {
-        parameters.put(parameterIndex, x != null ? x.toString() : null);
+        parameters.put(parameterIndex, x);
     }
 
     @Override
@@ -156,7 +169,7 @@ public class KoraPreparedStatement extends KoraStatement implements PreparedStat
 
     @Override
     public void setTimestamp(int parameterIndex, Timestamp x) throws SQLException {
-        parameters.put(parameterIndex, x != null ? x.toString() : null);
+        parameters.put(parameterIndex, x);
     }
 
     @Override
@@ -191,7 +204,8 @@ public class KoraPreparedStatement extends KoraStatement implements PreparedStat
 
     @Override
     public void addBatch() throws SQLException {
-        throw new SQLException("Batching in PreparedStatement not supported");
+        checkClosed();
+        batch.add(buildExecutableSql());   // parameters are bound now, as the JDBC spec requires
     }
 
     @Override

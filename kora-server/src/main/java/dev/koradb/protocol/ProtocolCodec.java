@@ -86,6 +86,11 @@ public final class ProtocolCodec {
 
         dos.flush();
         byte[] payload = baos.toByteArray();
+        if (payload.length > MAX_PAYLOAD_SIZE) {
+            // Checked before anything is written, so the connection stays usable.
+            throw new ProtocolException("Message is %d bytes; the maximum message size is %d bytes (16 MB)"
+                    .formatted(payload.length, MAX_PAYLOAD_SIZE));
+        }
 
         DataOutputStream headerOut = new DataOutputStream(out);
         headerOut.writeByte(MAGIC);

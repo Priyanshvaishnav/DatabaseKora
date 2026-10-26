@@ -231,7 +231,39 @@ public final class KoraDB implements AutoCloseable {
      * @param sql     the SQL string to execute
      * @return the {@link QueryResult}
      */
+    /** Receives every executed SQL string with its duration and outcome (used for query metrics). */
+    @FunctionalInterface
+    public interface QueryListener {
+        void onQuery(String sql, long durationNanos, boolean success);
+    }
+
+    private volatile QueryListener queryListener;
+
+    public void setQueryListener(QueryListener listener) {
+        this.queryListener = listener;
+    }
+
     public QueryResult execute(dev.koradb.session.Session session, String sql) {
+        QueryListener listener = queryListener;
+        if (listener == null) {
+            return executeSql(session, sql);
+        }
+        long t0 = System.nanoTime();
+        boolean ok = false;
+        try {
+            QueryResult r = executeSql(session, sql);
+            ok = true;
+            return r;
+        } finally {
+            try {
+                listener.onQuery(sql, System.nanoTime() - t0, ok);
+            } catch (RuntimeException e) {
+                log.debug("Query listener failed: {}", e.getMessage());
+            }
+        }
+    }
+
+    private QueryResult executeSql(dev.koradb.session.Session session, String sql) {
         log.debug("execute [session={}]: {}", session.getSessionId(), sql);
 
         String trimmed = sql.trim();
@@ -381,6 +413,15 @@ public final class KoraDB implements AutoCloseable {
                 yield QueryResult.ddl();
             }
             default -> {
+                if (session.hasActiveTransaction() && isDdl(statement)) {
+                    // DDL is not transactional (it is applied to the catalog immediately and cannot be
+                    // rolled back), so running it inside BEGIN ... ROLLBACK would silently keep it (M11).
+                    throw new dev.koradb.exception.ExecutionException(
+                            statement.getClass().getSimpleName().replace("Stmt", "")
+                                    .replaceAll("([a-z])([A-Z])", "$1 $2").toUpperCase()
+                                    + " cannot run inside a transaction because DDL cannot be rolled back. "
+                                    + "COMMIT or ROLLBACK first.");
+                }
                 if (session.hasActiveTransaction()) {
                     dev.koradb.transaction.Transaction txn = session.getActiveTransaction();
                     try {
@@ -415,6 +456,12 @@ public final class KoraDB implements AutoCloseable {
      * Returns the catalog used by this instance.
      * Intended for inspection in tests and tooling — not for direct mutation.
      */
+    private static boolean isDdl(Statement s) {
+        return s instanceof dev.koradb.sql.ast.CreateTableStmt || s instanceof dev.koradb.sql.ast.DropTableStmt
+                || s instanceof dev.koradb.sql.ast.CreateIndexStmt || s instanceof dev.koradb.sql.ast.DropIndexStmt
+                || s instanceof dev.koradb.sql.ast.CreateDatabaseStmt || s instanceof dev.koradb.sql.ast.DropDatabaseStmt;
+    }
+
     public Catalog getCatalog() {
         return catalog;
     }

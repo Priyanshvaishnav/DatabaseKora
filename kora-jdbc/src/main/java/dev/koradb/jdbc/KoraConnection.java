@@ -34,6 +34,10 @@ public class KoraConnection implements Connection {
     private final KoraClient client;
     private boolean autoCommit;
     private boolean inTransaction = false;
+    /** True after the server rolled the open transaction back on its own (write conflict / deadlock). */
+    private boolean serverAborted = false;
+    /** Server sessions default to SNAPSHOT isolation, reported to JDBC as REPEATABLE READ. */
+    private int isolationLevel = Connection.TRANSACTION_REPEATABLE_READ;
     private boolean closed = false;
     private String currentCatalog;
     private boolean readOnly = false;
@@ -78,12 +82,26 @@ public class KoraConnection implements Connection {
         try {
             // Manage implicit transaction start when autocommit is false
             String trimmed = sql.trim().toUpperCase();
-            if (!autoCommit && !inTransaction && !trimmed.startsWith("BEGIN") && !trimmed.startsWith("COMMIT") && !trimmed.startsWith("ROLLBACK")) {
+            if (!autoCommit && !inTransaction && !trimmed.startsWith("BEGIN") && !trimmed.startsWith("COMMIT")
+                    && !trimmed.startsWith("ROLLBACK") && !trimmed.startsWith("SET ")
+                    && !trimmed.startsWith("CREATE ") && !trimmed.startsWith("DROP ") && !trimmed.startsWith("USE ")) {
+                // DDL is not transactional on the server, so it is run outside a transaction
                 client.execute("BEGIN;");
                 inTransaction = true;
+                serverAborted = false;
             }
 
-            ClientQueryResult res = client.execute(sql);
+            ClientQueryResult res;
+            try {
+                res = client.execute(sql);
+            } catch (KoraClientException e) {
+                // The server rolls the transaction back itself on a write conflict or deadlock.
+                String m = String.valueOf(e.getMessage()).toLowerCase();
+                if (inTransaction && (m.contains("conflict") || m.contains("deadlock"))) {
+                    serverAborted = true;
+                }
+                throw e;
+            }
 
             if (trimmed.startsWith("COMMIT") || trimmed.startsWith("ROLLBACK")) {
                 inTransaction = false;
@@ -148,6 +166,12 @@ public class KoraConnection implements Connection {
             throw new SQLException("Cannot commit when autoCommit is enabled");
         }
         if (inTransaction) {
+            if (serverAborted) {
+                inTransaction = false;
+                serverAborted = false;
+                throw new SQLException("Cannot commit: the server already rolled this transaction back "
+                        + "after a write conflict or deadlock. Retry the transaction.", "40001");
+            }
             try {
                 client.execute("COMMIT;");
             } catch (KoraClientException e) {
@@ -166,11 +190,17 @@ public class KoraConnection implements Connection {
         }
         if (inTransaction) {
             try {
-                client.execute("ROLLBACK;");
+                if (!serverAborted) {
+                    client.execute("ROLLBACK;");
+                }
             } catch (KoraClientException e) {
-                throw new SQLException("Failed to rollback transaction: " + e.getMessage(), e);
+                // Already rolled back on the server (e.g. after a conflict): rollback is a no-op.
+                if (!String.valueOf(e.getMessage()).contains("No active transaction")) {
+                    throw new SQLException("Failed to rollback transaction: " + e.getMessage(), e);
+                }
             } finally {
                 inTransaction = false;
+                serverAborted = false;
             }
         }
     }
@@ -229,18 +259,22 @@ public class KoraConnection implements Connection {
     @Override
     public void setTransactionIsolation(int level) throws SQLException {
         checkClosed();
+        // READ UNCOMMITTED is upgraded to READ COMMITTED (allowed by JDBC); REPEATABLE READ maps to
+        // the server's SNAPSHOT isolation, which is also its default for client connections.
         String levelStr = switch (level) {
-            case Connection.TRANSACTION_READ_COMMITTED -> "READ_COMMITTED";
-            case Connection.TRANSACTION_REPEATABLE_READ, Connection.TRANSACTION_SERIALIZABLE -> "SERIALIZABLE";
+            case Connection.TRANSACTION_READ_UNCOMMITTED, Connection.TRANSACTION_READ_COMMITTED -> "READ_COMMITTED";
+            case Connection.TRANSACTION_REPEATABLE_READ -> "SNAPSHOT";
+            case Connection.TRANSACTION_SERIALIZABLE -> "SERIALIZABLE";
             default -> throw new SQLException("Unsupported isolation level: " + level);
         };
         executeRaw("SET TRANSACTION ISOLATION LEVEL " + levelStr + ";");
+        isolationLevel = level == Connection.TRANSACTION_READ_UNCOMMITTED ? Connection.TRANSACTION_READ_COMMITTED : level;
     }
 
     @Override
     public int getTransactionIsolation() throws SQLException {
         checkClosed();
-        return Connection.TRANSACTION_SERIALIZABLE;
+        return isolationLevel;
     }
 
     @Override
