@@ -287,9 +287,17 @@ public final class KoraDB implements AutoCloseable {
             return QueryResult.select(List.of(), List.of("name", "type", "value"));
         }
 
-        List<Token> tokens    = new Lexer(sql).tokenize();
-        Statement   statement = new Parser(tokens).parse();
-        return execute(session, statement);
+        List<Token>     tokens     = new Lexer(sql).tokenize();
+        List<Statement> statements = new Parser(tokens).parseAll();
+
+        // Execute all statements sequentially; return the last result.
+        // This matches the behaviour SQL editors (e.g. DBeaver) expect when
+        // they send a multi-statement script in a single request.
+        QueryResult last = QueryResult.select(List.of(), List.of());
+        for (Statement statement : statements) {
+            last = execute(session, statement);
+        }
+        return last;
     }
 
     private QueryResult getBufferPoolStatus() {

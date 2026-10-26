@@ -19,7 +19,10 @@ import static dev.koradb.sql.lexer.TokenType.*;
  *
  * <h2>Design</h2>
  * <ul>
- *   <li>One public method {@link #parse()} per call — parses exactly one statement.</li>
+ *   <li>{@link #parse()} parses exactly one statement (backward-compatible).</li>
+ *   <li>{@link #parseAll()} parses a multi-statement script separated by semicolons,
+ *       returning all statements as a list. This enables SQL editors (e.g. DBeaver)
+ *       to send a batch of statements in a single request.</li>
  *   <li>One private method per grammar rule, named after that rule.</li>
  *   <li>The parser peeks at the current token to decide which rule to apply,
  *       and consumes tokens by calling {@link #consume(TokenType, String)}.</li>
@@ -83,6 +86,38 @@ public final class Parser {
         }
 
         return stmt;
+    }
+
+    /**
+     * Parses all SQL statements from the token stream, separated by semicolons.
+     * Enables multi-statement scripts (e.g. from DBeaver or CLI scripts).
+     *
+     * <pre>
+     *   CREATE TABLE users (id INT, name VARCHAR);
+     *   INSERT INTO users VALUES (1, 'Alice');
+     *   SELECT * FROM users;
+     * </pre>
+     *
+     * @return ordered list of all parsed {@link Statement} AST nodes (never empty)
+     * @throws ParseException if any statement in the script cannot be parsed
+     */
+    public List<Statement> parseAll() {
+        log.debug("Parsing multi-statement script ({} token(s))", tokens.size());
+        List<Statement> statements = new ArrayList<>();
+
+        // Skip any leading semicolons / blank lines
+        while (check(SEMICOLON)) advance();
+
+        while (!isAtEnd()) {
+            statements.add(statement());
+            // Consume semicolons between statements
+            while (check(SEMICOLON)) advance();
+        }
+
+        if (statements.isEmpty()) {
+            throw new ParseException("No statements found in input", 0);
+        }
+        return statements;
     }
 
     // =========================================================================
