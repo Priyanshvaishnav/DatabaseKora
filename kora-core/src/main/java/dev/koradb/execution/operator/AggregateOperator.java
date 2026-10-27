@@ -43,7 +43,13 @@ public class AggregateOperator implements Operator {
             if (item.isAggregate()) {
                 DataType type = switch (item.aggregateType()) {
                     case COUNT -> DataType.BIGINT;
-                    case SUM, AVG -> DataType.DOUBLE;
+                    case AVG -> DataType.DOUBLE;
+                    case SUM -> {
+                        // SUM over an integer column stays an integer (m4); over DOUBLE it is DOUBLE
+                        ColumnDef c = child.getSchema().findColumn(item.aggregateColumn());
+                        yield c != null && (c.dataType() == DataType.INT || c.dataType() == DataType.BIGINT)
+                                ? DataType.BIGINT : DataType.DOUBLE;
+                    }
                     case MIN, MAX -> {
                         ColumnDef c = child.getSchema().findColumn(item.aggregateColumn());
                         yield c != null ? c.dataType() : DataType.VARCHAR;
@@ -125,15 +131,26 @@ public class AggregateOperator implements Operator {
                 }
                 case SUM -> {
                     double sum = 0.0;
+                    long longSum = 0L;
+                    boolean integral = true;
                     boolean hasVal = false;
                     for (Row r : rows) {
                         Object val = getVal(r, col);
                         if (val instanceof Number n) {
                             sum += n.doubleValue();
+                            if (n instanceof Integer || n instanceof Long) {
+                                try {
+                                    longSum = Math.addExact(longSum, n.longValue());
+                                } catch (ArithmeticException overflow) {
+                                    throw new dev.koradb.exception.ExecutionException("SUM(" + col + ") overflows BIGINT");
+                                }
+                            } else {
+                                integral = false;
+                            }
                             hasVal = true;
                         }
                     }
-                    output.put(alias, hasVal ? sum : null);
+                    output.put(alias, !hasVal ? null : (integral ? (Object) longSum : (Object) sum));
                 }
                 case AVG -> {
                     double sum = 0.0;

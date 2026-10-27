@@ -296,8 +296,9 @@ DiskCatalog primaryCatalog = (DiskCatalog) primaryDb.getCatalog();
 ReplicationMaster master = new ReplicationMaster(
     ReplicationMasterConfig.onPort(8766),
     primaryCatalog.getLogManager(),
-    primaryCatalog::getDatabaseTableFiles
+    primaryCatalog::snapshotFiles          // initial snapshot for new replicas
 );
+master.attachTo(primaryDb);              // needed for SYNC mode (commit waits for replica ACKs)
 master.start();
 
 // Start Read-Only Replica connecting to Primary
@@ -397,10 +398,19 @@ kora [store]> \advisor SELECT * FROM orders WHERE customer_id = 42;
 
 Or programmatically in Java:
 ```java
-KoraAi ai = KoraAi.builder().database(db).provider("rule-based").build();
+KoraAi ai = KoraAi.create(db, "rule-based");
 TranslationResult res = ai.translate("find users older than 25");
 System.out.println(res.generatedSql()); // SELECT * FROM users WHERE age > 25;
+
+// ask() translates and runs read-only statements; changes need an explicit policy
+AiQueryResult rows = ai.ask("orders that are pending");
+AiQueryResult del  = ai.ask("delete orders where status = cancelled", AiExecutionPolicy.ALLOW_WRITES);
 ```
+
+`ask()` never executes INSERT/UPDATE/DELETE unless called with `AiExecutionPolicy.ALLOW_WRITES`, nor DDL
+without `ALLOW_ALL`, and even then only when the request asks for that change. Generated SQL is
+checked against the schema, so a statement naming a table or column that does not exist is reported
+as invalid instead of being run.
 
 ---
 

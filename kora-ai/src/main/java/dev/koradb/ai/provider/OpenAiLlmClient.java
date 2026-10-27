@@ -78,7 +78,7 @@ public final class OpenAiLlmClient implements LlmClient {
         }
 
         try {
-            HttpResponse<String> response = httpClient.send(reqBuilder.build(), HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = HttpRetry.send(httpClient, reqBuilder.build(), "OpenAI");
             long duration = System.currentTimeMillis() - start;
 
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
@@ -96,14 +96,13 @@ public final class OpenAiLlmClient implements LlmClient {
                         getProviderName()
                 );
             } else {
-                throw new RuntimeException("OpenAI API returned HTTP " + response.statusCode() + ": " + response.body());
+                throw new LlmProviderException("OpenAI API returned HTTP " + response.statusCode() + ": " + response.body(), response.statusCode());
             }
 
-        } catch (IOException e) {
-            throw new RuntimeException("Network error communicating with OpenAI API: " + e.getMessage(), e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("OpenAI API request interrupted", e);
+        } catch (LlmProviderException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new LlmProviderException("Unreadable response from OpenAI API: " + e.getMessage(), 0, e);
         }
     }
 }

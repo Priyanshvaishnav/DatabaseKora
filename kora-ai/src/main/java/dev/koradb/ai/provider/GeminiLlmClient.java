@@ -81,7 +81,7 @@ public final class GeminiLlmClient implements LlmClient {
                 .build();
 
         try {
-            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = HttpRetry.send(httpClient, httpRequest, "Gemini");
             long duration = System.currentTimeMillis() - start;
 
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
@@ -99,14 +99,13 @@ public final class GeminiLlmClient implements LlmClient {
                         getProviderName()
                 );
             } else {
-                throw new RuntimeException("Gemini API returned HTTP " + response.statusCode() + ": " + response.body());
+                throw new LlmProviderException("Gemini API returned HTTP " + response.statusCode() + ": " + response.body(), response.statusCode());
             }
 
-        } catch (IOException e) {
-            throw new RuntimeException("Network error communicating with Gemini API: " + e.getMessage(), e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Gemini API request interrupted", e);
+        } catch (LlmProviderException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new LlmProviderException("Unreadable response from Gemini API: " + e.getMessage(), 0, e);
         }
     }
 }

@@ -116,7 +116,10 @@ public final class KoraClient implements AutoCloseable {
                         latency
                 );
             }
+            close();
             throw new ProtocolException("Unexpected response type to query: " + resp.getType());
+        } catch (ProtocolException e) {
+            throw new KoraClientException(e.getMessage(), e);
         } catch (IOException e) {
             close();
             throw new KoraClientException("Network I/O error during query execution: " + e.getMessage(), e);

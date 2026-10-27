@@ -295,7 +295,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         boolean recovered = false;
         long walMaxTxnId = 0L;
         dev.koradb.storage.recovery.RecoveryManager recoveryManager =
-                new dev.koradb.storage.recovery.RecoveryManager(walPath, db.logManager, db.files::get, db.files::values);
+                new dev.koradb.storage.recovery.RecoveryManager(walPath, db.logManager, tn -> resolveFile(db, tn), () -> withToast(db.files.values()));
         if (recoveryManager.needsRecovery()) {
             dev.koradb.storage.recovery.RecoveryResult recoveryResult = recoveryManager.recover();
             if (recoveryResult.hasRecoveredChanges()) {
@@ -409,6 +409,10 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         Path filePath = StorageConfig.tableFilePath(db.dir, tableName);
         try { Files.deleteIfExists(filePath); } catch (IOException e) {
             log.warn("Could not delete table file: {}", filePath, e);
+        }
+        Path toastPath = TableFile.toastPathFor(filePath);
+        try { Files.deleteIfExists(toastPath); } catch (IOException e) {
+            log.warn("Could not delete overflow file: {}", toastPath, e);
         }
         rewriteMeta(db);
         if (db.logManager != null && !suppressWalLogging) {
@@ -532,9 +536,35 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
                 .toList();
     }
 
-    @SuppressWarnings({"rawtypes", "unchecked"})
+    /** Cached planner statistics per table, with the table's write count when they were computed. */
+    private record CachedStats(TableStatistics stats, long modCount) {}
+    private final Map<TableFile, CachedStats> statsCache = Collections.synchronizedMap(new WeakHashMap<>());
+
+    /**
+     * Planner statistics for a table. Computing them scans the whole table, so they are cached and
+     * recomputed only after roughly 10% of the table (at least 100 rows) has been written since.
+     */
     TableStatistics getTableStatisticsIn(String dbName, String tableName) {
         Table table = getTableIn(dbName, tableName);
+        if (table instanceof DiskTable dt) {
+            TableFile tf = dt.getTableFile();
+            long mods = tf.getModCount();
+            CachedStats cached = statsCache.get(tf);
+            if (cached != null) {
+                long threshold = Math.max(100L, cached.stats().rowCount() / 10);
+                if (mods - cached.modCount() < threshold) {
+                    return cached.stats();
+                }
+            }
+            TableStatistics fresh = computeTableStatistics(table, tableName);
+            statsCache.put(tf, new CachedStats(fresh, mods));
+            return fresh;
+        }
+        return computeTableStatistics(table, tableName);
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private TableStatistics computeTableStatistics(Table table, String tableName) {
         List<Row> rows = table.getRows();
         long rowCount = rows.size();
         int pageCount = 1;
@@ -618,13 +648,34 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
             return null;
         }
         Path walPath = StorageConfig.walFilePath(db.dir);
-        return new dev.koradb.storage.recovery.RecoveryManager(walPath, db.logManager, db.files::get, db.files::values);
+        return new dev.koradb.storage.recovery.RecoveryManager(walPath, db.logManager, tn -> resolveFile(db, tn), () -> withToast(db.files.values()));
     }
 
     /** Table files of the default view's current database. */
     public Collection<TableFile> getOpenTableFiles() {
         OpenDb db = currentDbName == null ? null : openDbs.get(currentDbName);
-        return db == null ? List.of() : Collections.unmodifiableCollection(db.files.values());
+        return db == null ? List.of() : withToast(db.files.values());
+    }
+
+    /** Resolves a WAL table name; "t.toast" names the overflow file of table t. */
+    private static TableFile resolveFile(OpenDb db, String tableName) {
+        if (tableName == null) return null;
+        String key = tableName.toLowerCase();
+        if (TableFile.isToastName(key)) {
+            TableFile main = db.files.get(key.substring(0, key.length() - ".toast".length()));
+            return main == null ? null : main.toastTable(true);
+        }
+        return db.files.get(key);
+    }
+
+    /** The given table files plus their open overflow files. */
+    private static Collection<TableFile> withToast(Collection<TableFile> files) {
+        List<TableFile> all = new ArrayList<>(files);
+        for (TableFile tf : files) {
+            TableFile t = tf.toastTable(false);
+            if (t != null) all.add(t);
+        }
+        return Collections.unmodifiableList(all);
     }
 
     /** WALs of every open database (metrics). */
@@ -637,18 +688,47 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     /** Table files of every open database (metrics, buffer-pool status). */
     public Collection<TableFile> getAllOpenTableFiles() {
         List<TableFile> all = new ArrayList<>();
-        for (OpenDb db : openDbs.values()) all.addAll(db.files.values());
+        for (OpenDb db : openDbs.values()) all.addAll(withToast(db.files.values()));
         return all;
     }
 
     public TableFile getTableFile(String tableName) {
         if (tableName == null || currentDbName == null) return null;
         OpenDb db = openDbs.get(currentDbName);
-        return db == null ? null : db.files.get(tableName.toLowerCase());
+        return db == null ? null : resolveFile(db, tableName);
     }
 
     public Path getDataDir() {
         return dataDir;
+    }
+
+    /**
+     * Files of one database (relative path under the data directory -> bytes), used as the initial
+     * snapshot a replica receives before WAL streaming starts. Pass {@code catalog::snapshotFiles}
+     * as the snapshot supplier of a {@code ReplicationMaster}.
+     */
+    public Map<String, byte[]> snapshotFiles(String dbName) {
+        Map<String, byte[]> files = new java.util.HashMap<>();
+        Path dir = dataDir.resolve(dbName.toLowerCase());
+        if (!Files.exists(dir)) return files;
+        OpenDb db = openDbs.get(dbName.toLowerCase());
+        if (db != null) {
+            for (TableFile tf : withToast(db.files.values())) {
+                try { tf.getBufferPool().flushAll(); } catch (RuntimeException e) { log.warn("Flush before snapshot failed", e); }
+            }
+        }
+        try (var stream = Files.walk(dir)) {
+            stream.filter(Files::isRegularFile).forEach(p -> {
+                try {
+                    files.put(dataDir.relativize(p).toString().replace('\\', '/'), Files.readAllBytes(p));
+                } catch (IOException ignored) {
+                    // file vanished (e.g. dropped table) while walking
+                }
+            });
+        } catch (IOException e) {
+            log.warn("Could not read database '{}' for a snapshot: {}", dbName, e.getMessage());
+        }
+        return files;
     }
 
     @Override

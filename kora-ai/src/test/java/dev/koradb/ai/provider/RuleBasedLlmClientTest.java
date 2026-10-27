@@ -60,18 +60,19 @@ class RuleBasedLlmClientTest {
     @DisplayName("Translate delete queries")
     void testDeleteQueries() {
         assertThat(client.translateTextToSql("delete from sessions where expired = true"))
-                .isEqualTo("DELETE FROM SESSIONS WHERE EXPIRED = TRUE;");
+                .isEqualTo("delete from sessions where expired = true;");
     }
 
     @Test
-    @DisplayName("Preserve pre-existing SQL queries (passthrough uppercases)")
+    @DisplayName("Preserve pre-existing SQL queries unchanged (string literals keep their case)")
     void testRawSqlPassthrough() {
-        // The rule-based client uppercases passthrough SQL to canonical form
         assertThat(client.translateTextToSql("SELECT id, name FROM users WHERE id = 10;"))
-                .isEqualTo("SELECT ID, NAME FROM USERS WHERE ID = 10;");
+                .isEqualTo("SELECT id, name FROM users WHERE id = 10;");
+        assertThat(client.translateTextToSql("select * from customers where name = 'alice'"))
+                .isEqualTo("select * from customers where name = 'alice';");
         // Without semicolon — one is added
         assertThat(client.translateTextToSql("SELECT * FROM orders"))
-                .isEqualTo("SELECT * FROM ORDERS;");
+                .isEqualTo("SELECT * FROM orders;");
         // SHOW statements
         assertThat(client.translateTextToSql("SHOW TABLES;"))
                 .isEqualTo("SHOW TABLES;");
@@ -96,9 +97,9 @@ class RuleBasedLlmClientTest {
         assertThat(client.translateTextToSql("show me all products cheaper than 200"))
                 .isEqualTo("SELECT * FROM products WHERE price < 200;");
 
-        // "older than" — no column before the phrase, falls back to price inference
+        // "older than" — no column before the phrase: the phrase itself means age
         assertThat(client.translateTextToSql("get users older than 25"))
-                .isEqualTo("SELECT * FROM users WHERE price > 25;");
+                .isEqualTo("SELECT * FROM users WHERE age > 25;");
 
         // "more than" with explicit column before it
         assertThat(client.translateTextToSql("find orders with total more than 500"))

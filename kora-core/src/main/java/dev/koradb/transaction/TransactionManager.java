@@ -123,6 +123,28 @@ public class TransactionManager {
      * Commits the active transaction and releases all held locks.
      * Enforces the Force-Log-at-Commit rule by flushing the WAL up to the commit record.
      */
+    /** Observes transaction outcomes (metrics). Only transactions that wrote data are reported as commits. */
+    public interface OutcomeListener {
+        void onCommit(Transaction txn);
+        void onAbort(Transaction txn);
+    }
+
+    private final java.util.List<OutcomeListener> outcomeListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    public void addOutcomeListener(OutcomeListener l) {
+        outcomeListeners.add(java.util.Objects.requireNonNull(l));
+    }
+
+    private void notifyOutcome(Transaction txn, boolean committed) {
+        for (OutcomeListener l : outcomeListeners) {
+            try {
+                if (committed) l.onCommit(txn); else l.onAbort(txn);
+            } catch (RuntimeException e) {
+                log.debug("Transaction outcome listener failed: {}", e.getMessage());
+            }
+        }
+    }
+
     @FunctionalInterface
     public interface CommitHook {
         void onCommit(long commitLsn);
@@ -165,7 +187,8 @@ public class TransactionManager {
         // Release all SS2PL locks held by this transaction
         lockManager.releaseAll(txn.getId());
         activeTransactions.remove(txn.getId());
-        log.info("Transaction {} committed successfully", txn.getId());
+        notifyOutcome(txn, true);
+        log.debug("Transaction {} committed successfully", txn.getId());
     }
 
     /**
@@ -223,7 +246,8 @@ public class TransactionManager {
             lockManager.releaseAll(txn.getId());
             activeTransactions.remove(txn.getId());
         }
-        log.info("Transaction {} aborted and rolled back", txn.getId());
+        notifyOutcome(txn, false);
+        log.debug("Transaction {} aborted and rolled back", txn.getId());
     }
 
     public void recordCommitted(long txnId) {

@@ -48,12 +48,22 @@ public final class TableFile implements AutoCloseable {
     private final BufferPool       bufferPool;
     private final DiskPageManager  diskManager;
     private final RecordSerializer serializer;
+    private final Path             filePath;
 
     /**
      * Per-table latch. Writers mutate page byte arrays in place, so readers must not deserialize a
      * page while a writer is changing it, and two writers must not pick the same free slot.
      */
     private final java.util.concurrent.locks.ReentrantReadWriteLock latch = new java.util.concurrent.locks.ReentrantReadWriteLock();
+
+    /** First page an insert should try (M4); see insertRow. */
+    private volatile int insertHintPage = 0;
+    /** Number of row writes since open; lets callers cache derived data such as statistics. */
+    private final java.util.concurrent.atomic.AtomicLong modCount = new java.util.concurrent.atomic.AtomicLong();
+
+    public long getModCount() {
+        return modCount.get();
+    }
 
     private <T> T writeLocked(java.util.function.Supplier<T> body) {
         latch.writeLock().lock();
@@ -77,6 +87,7 @@ public final class TableFile implements AutoCloseable {
         this.diskManager = bufferPool.getDiskManager();
         this.bufferPool  = bufferPool;
         this.serializer  = new RecordSerializer(schema);
+        this.filePath    = filePath;
         String fn        = filePath.getFileName().toString();
         this.tableName   = fn.endsWith(".kdb") ? fn.substring(0, fn.length() - 4) : fn;
         log.debug("TableFile opened with buffer pool: {}", filePath.getFileName());
@@ -132,14 +143,19 @@ public final class TableFile implements AutoCloseable {
             row.setXmin(txn.getId().value());
             row.setXmax(0L);
         }
-        byte[] record = serializer.serialize(row);
+        byte[] record = serializer.serialize(toastIfNeeded(row, txn));
 
+        // Start at the last page that had room (M4): pages before it are full, because tombstoned
+        // slots never give space back. Without the hint every insert rescanned the whole file.
         int totalPages = diskManager.pageCount();
-        for (int pid = 0; pid < totalPages; pid++) {
+        int startPage = Math.max(0, Math.min(insertHintPage, totalPages - 1));
+        for (int pid = startPage; pid < totalPages; pid++) {
             BufferFrame frame = bufferPool.pin(pid);
             try {
                 SlottedPage sp = new SlottedPage(frame.getPage());
                 if (sp.freeSpace() >= StorageConfig.SLOT_SIZE + record.length) {
+                    insertHintPage = pid;
+                    modCount.incrementAndGet();
                     int slot = sp.insertRecord(record);
                     applyWalAndMarkDirty(frame, slot, new byte[0], record, txn);
                     RecordId rid = new RecordId(pid, slot);
@@ -155,6 +171,8 @@ public final class TableFile implements AutoCloseable {
         BufferFrame frame = bufferPool.allocatePage();
         try {
             SlottedPage sp   = new SlottedPage(frame.getPage());
+            insertHintPage = frame.getPage().getPageId();
+            modCount.incrementAndGet();
             int         slot = sp.insertRecord(record);
             applyWalAndMarkDirty(frame, slot, new byte[0], record, txn);
             RecordId rid = new RecordId(frame.getPage().getPageId(), slot);
@@ -202,11 +220,11 @@ public final class TableFile implements AutoCloseable {
                         Row    r      = serializer.deserialize(record);
                         if (readView != null) {
                             if (readView.isVisible(r.getXmin(), r.getXmax())) {
-                                result.add(new RidRow(new RecordId(pid, slot), r));
+                                result.add(new RidRow(new RecordId(pid, slot), detoast(r)));
                             }
                         } else {
                             if (r.getXmax() == 0L) {
-                                result.add(new RidRow(new RecordId(pid, slot), r));
+                                result.add(new RidRow(new RecordId(pid, slot), detoast(r)));
                             }
                         }
                     }
@@ -233,7 +251,7 @@ public final class TableFile implements AutoCloseable {
                     SlottedPage sp = new SlottedPage(frame.getPage());
                     for (int slot = 0; slot < sp.slotCount(); slot++) {
                         if (sp.isAlive(slot)) {
-                            result.add(new RidRow(new RecordId(pid, slot), serializer.deserialize(sp.getRecord(slot))));
+                            result.add(new RidRow(new RecordId(pid, slot), detoastLenient(serializer.deserialize(sp.getRecord(slot)))));
                         }
                     }
                 } finally {
@@ -266,11 +284,11 @@ public final class TableFile implements AutoCloseable {
                         Row    r      = serializer.deserialize(record);
                         if (readView != null) {
                             if (readView.isVisible(r.getXmin(), r.getXmax())) {
-                                result.add(r);
+                                result.add(detoast(r));
                             }
                         } else {
                             if (r.getXmax() == 0L) {
-                                result.add(r);
+                                result.add(detoast(r));
                             }
                         }
                     }
@@ -296,7 +314,7 @@ public final class TableFile implements AutoCloseable {
         try {
             SlottedPage sp = new SlottedPage(frame.getPage());
             if (!sp.isAlive(rid.slotIndex())) return null;
-            return serializer.deserialize(sp.getRecord(rid.slotIndex()));
+            return detoast(serializer.deserialize(sp.getRecord(rid.slotIndex())));
         } finally {
             bufferPool.unpin(frame);
         }
@@ -321,9 +339,9 @@ public final class TableFile implements AutoCloseable {
             byte[] record = sp.getRecord(rid.slotIndex());
             Row r = serializer.deserialize(record);
             if (readView != null) {
-                return readView.isVisible(r.getXmin(), r.getXmax()) ? r : null;
+                return readView.isVisible(r.getXmin(), r.getXmax()) ? detoast(r) : null;
             } else {
-                return r.getXmax() == 0L ? r : null;
+                return r.getXmax() == 0L ? detoast(r) : null;
             }
         } finally {
             bufferPool.unpin(frame);
@@ -369,6 +387,7 @@ public final class TableFile implements AutoCloseable {
                 throw new dev.koradb.mvcc.WriteConflictException(oldXmax, txnId);
             }
 
+            modCount.incrementAndGet();
             byte[] newBytes = oldBytes.clone();
             RecordSerializer.setXmax(newBytes, txnId);
             sp.updateRecord(rid.slotIndex(), newBytes);
@@ -385,8 +404,19 @@ public final class TableFile implements AutoCloseable {
      * Reclaims page space occupied by dead tuple versions whose xmax is older than lowWatermark.
      */
     public int vacuum(long lowWatermark, java.util.function.Predicate<Long> isCommitted) {
+        return vacuum(lowWatermark, isCommitted, null);
+    }
+
+    /**
+     * Tombstones row versions deleted by a transaction that committed before {@code lowWatermark}
+     * (no snapshot can still see them). Reclaimed RIDs are reported to {@code reclaimedOut}
+     * (if non-null) so index entries pointing at them can be removed.
+     */
+    public int vacuum(long lowWatermark, java.util.function.Predicate<Long> isCommitted,
+                      java.util.List<RecordId> reclaimedOut) {
         return writeLocked(() -> {
         int reclaimed = 0;
+        List<RecordId> freedChunks = new ArrayList<>();
         int totalPages = diskManager.pageCount();
         for (int pid = 0; pid < totalPages; pid++) {
             BufferFrame frame = bufferPool.pin(pid);
@@ -398,7 +428,9 @@ public final class TableFile implements AutoCloseable {
                         byte[] record = sp.getRecord(slot);
                         long xmax = RecordSerializer.extractXmax(record);
                         if (xmax != 0L && xmax < lowWatermark && isCommitted.test(xmax)) {
+                            if (toast != null) collectChunks(serializer.deserialize(record), freedChunks);
                             sp.deleteRecord(slot);
+                            if (reclaimedOut != null) reclaimedOut.add(new RecordId(pid, slot));
                             modified = true;
                             reclaimed++;
                         }
@@ -411,6 +443,7 @@ public final class TableFile implements AutoCloseable {
                 bufferPool.unpin(frame);
             }
         }
+        if (!freedChunks.isEmpty()) toast.freeChunks(freedChunks);
         return reclaimed;
     });
     }
@@ -498,6 +531,8 @@ public final class TableFile implements AutoCloseable {
      */
     @Override
     public void close() {
+        TableFile t = toast;
+        if (t != null) t.close();
         bufferPool.close();
     }
 
@@ -558,6 +593,225 @@ public final class TableFile implements AutoCloseable {
             } finally {
                 bufferPool.unpin(frame);
             }
+        });
+    }
+
+
+    // =========================================================================
+    // Out-of-line storage for large values (TOAST-style overflow)
+    // =========================================================================
+
+    /** Prefix of an in-row pointer to an out-of-line value. Values starting with it are always stored out of line. */
+    static final String TOAST_MAGIC = "\u0000\u0001KORA-TOAST:";
+    /** Largest single VARCHAR value accepted (stored out of line). */
+    public static final int MAX_VARCHAR_BYTES = 16 * 1024 * 1024;
+    /** Out-of-line chunk payload size (UTF-8 bytes); several chunks fit on one page. */
+    private static final int CHUNK_BYTES = 1800;
+    /** Rows are kept to about half a page so a page holds more than one row. */
+    private static final int ROW_TARGET_BYTES = StorageConfig.MAX_RECORD_SIZE / 2;
+    /** VARCHAR values at least this large are candidates for out-of-line storage. */
+    private static final int TOAST_MIN_VALUE_BYTES = 256;
+    private static final Schema TOAST_SCHEMA = new Schema(java.util.List.of(
+            new dev.koradb.sql.ast.ColumnDef("chunk", dev.koradb.sql.ast.DataType.VARCHAR)));
+
+    private volatile TableFile toast;
+
+    /** Path of the overflow file that belongs to a table file. */
+    public static Path toastPathFor(Path tableFilePath) {
+        String fn = tableFilePath.getFileName().toString();
+        String base = fn.endsWith(".kdb") ? fn.substring(0, fn.length() - 4) : fn;
+        return tableFilePath.resolveSibling(base + ".toast.kdb");
+    }
+
+    /** True for the WAL table name of an overflow file ("orders.toast"). */
+    public static boolean isToastName(String tableName) {
+        return tableName != null && tableName.toLowerCase().endsWith(".toast");
+    }
+
+    /**
+     * The overflow table of this table, opened on first use. With {@code create=false} it is only
+     * opened when its file already exists (recovery / replication / reads); returns null otherwise.
+     */
+    public TableFile toastTable(boolean create) {
+        TableFile t = toast;
+        if (t != null) return t;
+        synchronized (this) {
+            if (toast == null) {
+                Path tp = toastPathFor(filePath);
+                if (!create && !java.nio.file.Files.exists(tp)) return null;
+                toast = new TableFile(TOAST_SCHEMA, tp, new BufferPool(new DiskPageManager(tp), bufferPool.getLogManager()));
+            }
+            return toast;
+        }
+    }
+
+    /** Returns a copy of {@code row} whose large VARCHAR values are moved out of line (or {@code row} itself). */
+    private Row toastIfNeeded(Row row, dev.koradb.transaction.Transaction txn) {
+        if (isToastName(tableName)) return row;            // chunks are always small and stored verbatim
+        java.util.List<dev.koradb.sql.ast.ColumnDef> cols = schema.columns();
+        int total = 0;
+        java.util.List<Object[]> candidates = new java.util.ArrayList<>();   // {column name, utf8 length}
+        boolean forced = false;
+        for (dev.koradb.sql.ast.ColumnDef c : cols) {
+            Object v = row.get(c.name());
+            if (v instanceof String str && c.dataType() == dev.koradb.sql.ast.DataType.VARCHAR) {
+                int len = str.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                if (len > MAX_VARCHAR_BYTES) {
+                    throw new StorageException("VARCHAR value for column '%s' is %d bytes; the maximum is %d bytes"
+                            .formatted(c.name(), len, MAX_VARCHAR_BYTES));
+                }
+                total += len + 2;
+                if (str.startsWith(TOAST_MAGIC)) forced = true;
+                if (len >= TOAST_MIN_VALUE_BYTES || str.startsWith(TOAST_MAGIC)) candidates.add(new Object[]{c.name(), len});
+            } else {
+                total += 8;
+            }
+        }
+        if (!forced && total <= ROW_TARGET_BYTES) return row;
+        candidates.sort((a, b) -> Integer.compare((Integer) b[1], (Integer) a[1]));
+        java.util.Map<String, Object> vals = new java.util.LinkedHashMap<>(row.values());
+        for (Object[] cand : candidates) {
+            String col = (String) cand[0];
+            String str = (String) vals.get(col);
+            boolean mustToast = str.startsWith(TOAST_MAGIC);
+            if (!mustToast && total <= ROW_TARGET_BYTES) continue;
+            String pointer = writeOutOfLine(str, txn);
+            total -= (Integer) cand[1];
+            total += pointer.length();
+            vals.put(col, pointer);
+        }
+        Row stored = new Row(vals, row.getXmin(), row.getXmax());
+        return stored;
+    }
+
+    /** Writes a value as chunks into the overflow table; returns the in-row pointer. */
+    private String writeOutOfLine(String value, dev.koradb.transaction.Transaction txn) {
+        String ptr = writeChunks(value, txn);
+        // A very large value has a long chunk list; store the list itself out of line ("I" = indirect).
+        while (ptr.length() > MAX_POINTER_CHARS) {
+            ptr = TOAST_MAGIC + "I" + writeChunks(ptr, txn).substring(TOAST_MAGIC.length());
+        }
+        return ptr;
+    }
+
+    private static final int MAX_POINTER_CHARS = 512;
+
+    private String writeChunks(String value, dev.koradb.transaction.Transaction txn) {
+        TableFile t = toastTable(true);
+        StringBuilder ptr = new StringBuilder(TOAST_MAGIC).append(value.length());
+        int i = 0;
+        while (i < value.length()) {
+            int end = i, bytes = 0;
+            while (end < value.length()) {
+                int cp = value.codePointAt(end);
+                int cpBytes = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+                if (bytes + cpBytes > CHUNK_BYTES) break;
+                bytes += cpBytes;
+                end += Character.charCount(cp);
+            }
+            Row chunk = new Row(new java.util.LinkedHashMap<>(java.util.Map.of("chunk", value.substring(i, end))));
+            RecordId rid = t.insertRow(chunk, txn);   // WAL-logged under the same transaction
+            ptr.append(':').append(rid.pageId()).append('.').append(rid.slotIndex());
+            i = end;
+        }
+        return ptr.toString();
+    }
+
+    /** Replaces out-of-line pointers in {@code r} by the stored values. */
+    private Row detoast(Row r) {
+        if (r == null || isToastName(tableName)) return r;
+        java.util.Map<String, Object> vals = null;
+        for (java.util.Map.Entry<String, Object> e : r.values().entrySet()) {
+            if (e.getValue() instanceof String str && str.startsWith(TOAST_MAGIC)) {
+                if (vals == null) vals = new java.util.LinkedHashMap<>(r.values());
+                vals.put(e.getKey(), readOutOfLine(str));
+            }
+        }
+        return vals == null ? r : new Row(vals, r.getXmin(), r.getXmax());
+    }
+
+    private String readOutOfLine(String pointer) {
+        String body = pointer.substring(TOAST_MAGIC.length());
+        if (body.startsWith("I")) {
+            return readOutOfLine(readOutOfLine(TOAST_MAGIC + body.substring(1)));
+        }
+        String[] parts = body.split(":");
+        int length = Integer.parseInt(parts[0]);
+        TableFile t = toastTable(false);
+        if (t == null) {
+            throw new StorageException("Overflow file for table '" + tableName + "' is missing");
+        }
+        StringBuilder sb = new StringBuilder(length);
+        for (int k = 1; k < parts.length; k++) {
+            int dot = parts[k].indexOf('.');
+            RecordId rid = new RecordId(Integer.parseInt(parts[k].substring(0, dot)), Integer.parseInt(parts[k].substring(dot + 1)));
+            Row chunk = t.readRawRow(rid);
+            if (chunk == null) {
+                throw new StorageException("Overflow chunk " + rid + " of table '" + tableName + "' is missing");
+            }
+            sb.append((String) chunk.get("chunk"));
+        }
+        return sb.toString();
+    }
+
+
+    /** Like {@link #detoast} but leaves a pointer in place if its chunks are gone (dead versions after VACUUM). */
+    private Row detoastLenient(Row r) {
+        try {
+            return detoast(r);
+        } catch (RuntimeException e) {
+            return r;
+        }
+    }
+
+    /** Adds the overflow chunks referenced by {@code r} (including indirect chunk lists) to {@code out}. */
+    private void collectChunks(Row r, List<RecordId> out) {
+        for (Object v : r.values().values()) {
+            if (v instanceof String str && str.startsWith(TOAST_MAGIC)) {
+                try {
+                    collectPointer(str, out);
+                } catch (RuntimeException e) {
+                    log.warn("Could not resolve overflow pointer of a reclaimed row in '{}': {}", tableName, e.getMessage());
+                }
+            }
+        }
+    }
+
+    private void collectPointer(String pointer, List<RecordId> out) {
+        String body = pointer.substring(TOAST_MAGIC.length());
+        boolean indirect = body.startsWith("I");
+        if (indirect) body = body.substring(1);
+        String[] parts = body.split(":");
+        List<RecordId> rids = new ArrayList<>();
+        for (int k = 1; k < parts.length; k++) {
+            int dot = parts[k].indexOf('.');
+            rids.add(new RecordId(Integer.parseInt(parts[k].substring(0, dot)), Integer.parseInt(parts[k].substring(dot + 1))));
+        }
+        if (indirect) {
+            collectPointer(readOutOfLine(TOAST_MAGIC + body), out);   // the chunk list itself
+        }
+        out.addAll(rids);
+    }
+
+    /** Physically frees overflow chunks of reclaimed rows (VACUUM; like the main table, not WAL-logged). */
+    void freeChunks(List<RecordId> rids) {
+        writeLocked(() -> {
+            for (RecordId rid : rids) {
+                if (rid.pageId() >= diskManager.pageCount()) continue;
+                BufferFrame frame = bufferPool.pin(rid.pageId());
+                try {
+                    SlottedPage sp = new SlottedPage(frame.getPage());
+                    if (rid.slotIndex() < sp.slotCount() && sp.isAlive(rid.slotIndex())) {
+                        sp.deleteRecord(rid.slotIndex());
+                        bufferPool.markDirty(frame);
+                    }
+                } finally {
+                    bufferPool.unpin(frame);
+                }
+            }
+            modCount.addAndGet(rids.size());
+            insertHintPage = 0;
+            return null;
         });
     }
 

@@ -46,13 +46,21 @@ public final class RuleBasedLlmClient implements LlmClient {
 
         // 3. Otherwise handle Text-to-SQL translation
         String rawQuery = user.replace("Translate the following request into a valid KoraDB SQL query:", "").trim();
-        String sql = translateTextToSql(rawQuery);
+        String sql = translateTextToSql(rawQuery, SchemaAwareTranslator.fromPrompt(system));
         String formattedResponse = "```sql\n" + sql + "\n```";
 
         return LlmResponse.of(formattedResponse, MODEL_NAME, PROVIDER_NAME, System.currentTimeMillis() - start);
     }
 
     public String translateTextToSql(String text) {
+        return translateTextToSql(text, null);
+    }
+
+    /**
+     * Translates with knowledge of the schema (and known column values) when {@code schema} is not
+     * null: only existing tables and columns are used, otherwise a "-- Could not translate" comment.
+     */
+    String translateTextToSql(String text, SchemaAwareTranslator schema) {
         String cleaned = text.trim();
         if (cleaned.endsWith("?")) {
             cleaned = cleaned.substring(0, cleaned.length() - 1).trim();
@@ -79,11 +87,15 @@ public final class RuleBasedLlmClient implements LlmClient {
             lower.startsWith("drop ") || lower.startsWith("use ") ||
             lower.startsWith("describe ") || lower.startsWith("desc ") ||
             isExplicitShow) {
-            // Uppercase the SQL keyword portion so output is always canonical SQL
-            String canonical = cleaned.toUpperCase(Locale.ROOT);
-            // But preserve string literals (values in quotes) — simple approach: just uppercase the whole thing
-            // For a rule-based client this is acceptable since we don't support mixed-case identifiers
-            return canonical.endsWith(";") ? canonical : canonical + ";";
+            // SQL is passed through unchanged: uppercasing it would also change string literals
+            // ('alice' -> 'ALICE') and so the rows it matches. Only metadata commands are normalised.
+            String out = (isExplicitShow || lower.startsWith("describe ") || lower.startsWith("desc "))
+                    ? cleaned.toUpperCase(Locale.ROOT) : cleaned;
+            return out.endsWith(";") ? out : out + ";";
+        }
+
+        if (schema != null) {
+            return schema.translate(cleaned);
         }
 
         // ── Strict structural patterns (highest priority) ──────────────────────
@@ -217,7 +229,7 @@ public final class RuleBasedLlmClient implements LlmClient {
             // If col is a stopword, empty, or equals the table name (e.g. "products cheaper than")
             // then fall back to inferring a sensible column name
             if (col.isEmpty() || STOP_WORDS.contains(col) || col.equals(table)) {
-                col = inferColumnForOp(sqlOps[i], table);
+                col = inferColumnForOp(nlOps[i], sqlOps[i], table);
             }
 
             String quotedVal = quoteIfNeeded(value);
@@ -275,7 +287,8 @@ public final class RuleBasedLlmClient implements LlmClient {
     }
 
     /** Best-guess column name for common operators when column cannot be parsed */
-    private String inferColumnForOp(String op, String table) {
+    private String inferColumnForOp(String phrase, String op, String table) {
+        if (phrase.contains("older") || phrase.contains("younger")) return "age";
         return switch (op) {
             case "<", "<=" -> "price";
             case ">", ">=" -> "price";

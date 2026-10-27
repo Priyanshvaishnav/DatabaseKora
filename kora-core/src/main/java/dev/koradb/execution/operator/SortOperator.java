@@ -35,6 +35,12 @@ public class SortOperator implements Operator {
             rows.add(r);
         }
 
+        for (OrderItem item : orderItems) {
+            if (!resolvable(item.columnName(), rows.isEmpty() ? null : rows.get(0))) {
+                throw new dev.koradb.exception.ExecutionException("ORDER BY column '" + item.columnName() + "' does not exist");
+            }
+        }
+
         if (!orderItems.isEmpty()) {
             rows.sort((r1, r2) -> {
                 for (OrderItem item : orderItems) {
@@ -52,6 +58,29 @@ public class SortOperator implements Operator {
 
         this.sortedRows = rows;
         this.cursor = 0;
+    }
+
+    /** True when {@code colName} names a column of the input (by the same rules {@link #getVal} uses). */
+    private boolean resolvable(String colName, Row sample) {
+        if (sample != null) {
+            for (String key : sample.values().keySet()) {
+                if (matches(key, colName)) return true;
+            }
+            return false;
+        }
+        Schema schema = child.getSchema();
+        if (schema == null || schema.columns().isEmpty()) return true;   // nothing to check against
+        for (dev.koradb.sql.ast.ColumnDef c : schema.columns()) {
+            if (matches(c.name(), colName)) return true;
+        }
+        return false;
+    }
+
+    private static boolean matches(String key, String colName) {
+        if (key.equalsIgnoreCase(colName)) return true;
+        String k = key.toLowerCase(), n = colName.toLowerCase();
+        String shortName = n.contains(".") ? n.substring(n.indexOf('.') + 1) : n;
+        return k.equals(shortName) || k.endsWith("." + shortName);
     }
 
     private Object getVal(Row row, String colName) {

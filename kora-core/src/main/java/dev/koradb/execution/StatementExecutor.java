@@ -100,6 +100,7 @@ public final class StatementExecutor {
             case BeginStmt          s -> QueryResult.ddl();
             case CommitStmt         s -> QueryResult.ddl();
             case RollbackStmt       s -> QueryResult.ddl();
+            case ShowStmt           s -> executeShow(s, catalog);
         };
     }
 
@@ -534,14 +535,29 @@ public final class StatementExecutor {
         return switch (targetType) {
             case INT -> switch (raw) {
                 case Integer i -> i;
-                case Long    l -> l.intValue();
-                case Double  d -> d.intValue();
+                case Long    l -> {
+                    if (l < Integer.MIN_VALUE || l > Integer.MAX_VALUE) {
+                        yield failRange(raw, targetType, colName);
+                    }
+                    yield l.intValue();
+                }
+                case Double  d -> {
+                    if (d != Math.rint(d) || d < Integer.MIN_VALUE || d > Integer.MAX_VALUE) {
+                        yield failRange(raw, targetType, colName);
+                    }
+                    yield d.intValue();
+                }
                 default        -> failCoerce(raw, targetType, colName);
             };
             case BIGINT -> switch (raw) {
                 case Integer i -> i.longValue();
                 case Long    l -> l;
-                case Double  d -> d.longValue();
+                case Double  d -> {
+                    if (d != Math.rint(d) || d < -9.223372036854775808E18 || d >= 9.223372036854775808E18) {
+                        yield failRange(raw, targetType, colName);
+                    }
+                    yield d.longValue();
+                }
                 default        -> failCoerce(raw, targetType, colName);
             };
             case DOUBLE -> switch (raw) {
@@ -566,14 +582,38 @@ public final class StatementExecutor {
         };
     }
 
+    /**
+     * Accepts 'yyyy-MM-dd HH:mm:ss', an ISO 'T' separator, optional fractional seconds (as sent by
+     * JDBC Timestamp.toString()) and a bare date (midnight). TIMESTAMP is stored with second
+     * precision, so fractional seconds are truncated.
+     */
+    private static final DateTimeFormatter LENIENT_TIMESTAMP = new java.time.format.DateTimeFormatterBuilder()
+            .appendPattern("yyyy-MM-dd")
+            .optionalStart().appendLiteral(' ').optionalEnd()
+            .optionalStart().appendLiteral('T').optionalEnd()
+            .optionalStart().appendPattern("HH:mm:ss")
+            .optionalStart().appendFraction(java.time.temporal.ChronoField.NANO_OF_SECOND, 0, 9, true).optionalEnd()
+            .optionalEnd()
+            .parseDefaulting(java.time.temporal.ChronoField.HOUR_OF_DAY, 0)
+            .parseDefaulting(java.time.temporal.ChronoField.MINUTE_OF_HOUR, 0)
+            .parseDefaulting(java.time.temporal.ChronoField.SECOND_OF_MINUTE, 0)
+            .toFormatter();
+
     private LocalDateTime parseTimestamp(String s, String colName) {
         try {
-            return LocalDateTime.parse(s, TIMESTAMP_FORMAT);
+            return LocalDateTime.parse(s.trim(), LENIENT_TIMESTAMP).withNano(0);
         } catch (DateTimeParseException e) {
             throw new ExecutionException(
-                    "Cannot parse '%s' as TIMESTAMP for column '%s'. " +
-                    "Expected format: yyyy-MM-dd HH:mm:ss".formatted(s, colName));
+                    ("Cannot parse '%s' as TIMESTAMP for column '%s'. " +
+                    "Expected format: yyyy-MM-dd HH:mm:ss").formatted(s, colName));
         }
+    }
+
+    /** Value of the right kind but not representable exactly in the column type (M5: no silent truncation). */
+    private Object failRange(Object value, DataType target, String colName) {
+        throw new ExecutionException(
+                "Value %s is out of range for column '%s' of type %s (it would be truncated)"
+                        .formatted(value, colName, target));
     }
 
     private Object failCoerce(Object value, DataType target, String colName) {
@@ -618,6 +658,35 @@ public final class StatementExecutor {
             if (!deleted) {
                 throw new dev.koradb.exception.StorageException("Unique index violation: duplicate key '%s' in index '%s'"
                         .formatted(value, idx.getName()));
+            }
+        }
+    }
+
+
+    private QueryResult executeShow(ShowStmt stmt, Catalog catalog) {
+        List<Row> rows = new ArrayList<>();
+        switch (stmt.kind()) {
+            case DATABASES -> {
+                for (String name : catalog.listDatabases()) {
+                    rows.add(new Row(new java.util.LinkedHashMap<>(Map.of("database", name))));
+                }
+                return new QueryResult(rows, 0, List.of("database"));
+            }
+            case TABLES -> {
+                for (Table t : catalog.requireCurrentDatabase().listTables()) {
+                    rows.add(new Row(new java.util.LinkedHashMap<>(Map.of("table_name", t.getName()))));
+                }
+                return new QueryResult(rows, 0, List.of("table_name"));
+            }
+            default -> {
+                Table t = catalog.getTable(stmt.tableName());
+                for (ColumnDef c : t.getSchema().columns()) {
+                    java.util.LinkedHashMap<String, Object> v = new java.util.LinkedHashMap<>();
+                    v.put("column_name", c.name());
+                    v.put("data_type", c.dataType().name());
+                    rows.add(new Row(v));
+                }
+                return new QueryResult(rows, 0, List.of("column_name", "data_type"));
             }
         }
     }

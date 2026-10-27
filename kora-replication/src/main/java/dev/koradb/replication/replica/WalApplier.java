@@ -90,49 +90,50 @@ public final class WalApplier {
     }
 
     private void applyUpdate(UpdateLogRecord update) {
-        TableFile tf = tableFileResolver.apply(update.getTableName());
+        applyImage(update.getTableName(), update.getPageId(), update.getSlotIndex(),
+                update.getAfterImage(), update.getLsn());
+    }
+
+    /**
+     * A CLR restores the before-image of an undone change. An EMPTY restored image means
+     * "remove the row this (aborted) transaction inserted": it must be applied physically,
+     * otherwise the row survives on the replica and becomes visible after a restart, when
+     * the in-memory record of the abort is gone.
+     */
+    private void applyClr(ClrLogRecord clr) {
+        applyImage(clr.getTableName(), clr.getPageId(), clr.getSlotIndex(),
+                clr.getRestoredImage(), clr.getLsn());
+    }
+
+    /** Applies one page change idempotently (skipped when the page already has this LSN). */
+    private void applyImage(String tableName, int pageId, int slot, byte[] image, long lsn) {
+        TableFile tf = tableFileResolver.apply(tableName);
         if (tf == null) {
-            log.warn("Cannot apply update at LSN {}: table '{}' not found", update.getLsn(), update.getTableName());
+            log.warn("Cannot apply WAL record at LSN {}: table '{}' not found", lsn, tableName);
             return;
         }
-
-        // Allocate pages if needed
-        while (tf.pageCount() <= update.getPageId()) {
+        while (tf.pageCount() <= pageId) {
             BufferFrame newFrame = tf.getBufferPool().allocatePage();
             tf.getBufferPool().unpin(newFrame);
         }
-
-        BufferFrame frame = tf.getBufferPool().pin(update.getPageId());
+        BufferFrame frame = tf.getBufferPool().pin(pageId);
         try {
+            if (frame.getPage().getPageLsn() >= lsn) {
+                return; // already applied (catch-up overlap / re-delivery)
+            }
             SlottedPage sp = new SlottedPage(frame.getPage());
-            byte[] afterImage = update.getAfterImage();
-            if (afterImage != null && afterImage.length > 0) {
-                if (update.getSlotIndex() < sp.slotCount()) {
-                    sp.updateRecord(update.getSlotIndex(), afterImage);
-                } else {
-                    sp.insertRecord(afterImage);
+            if (image == null || image.length == 0) {
+                if (sp.isAlive(slot)) {
+                    sp.deleteRecord(slot);
                 }
+            } else if (slot < sp.slotCount()) {
+                sp.updateRecord(slot, image);
+            } else if (slot == sp.slotCount()) {
+                sp.insertRecord(image);
+            } else {
+                log.warn("WAL record at LSN {} targets slot {} beyond page {} slot count {}", lsn, slot, pageId, sp.slotCount());
             }
-            frame.getPage().setPageLsn(update.getLsn());
-            tf.getBufferPool().markDirty(frame);
-        } finally {
-            tf.getBufferPool().unpin(frame);
-        }
-    }
-
-    private void applyClr(ClrLogRecord clr) {
-        TableFile tf = tableFileResolver.apply(clr.getTableName());
-        if (tf == null) {
-            return;
-        }
-
-        BufferFrame frame = tf.getBufferPool().pin(clr.getPageId());
-        try {
-            SlottedPage sp = new SlottedPage(frame.getPage());
-            if (clr.getRestoredImage() != null && clr.getRestoredImage().length > 0) {
-                sp.updateRecord(clr.getSlotIndex(), clr.getRestoredImage());
-            }
-            frame.getPage().setPageLsn(clr.getLsn());
+            frame.getPage().setPageLsn(lsn);
             tf.getBufferPool().markDirty(frame);
         } finally {
             tf.getBufferPool().unpin(frame);

@@ -42,6 +42,11 @@ public interface Index extends AutoCloseable {
         insert(key, rid);
     }
 
+    /** Removes every entry pointing at one of {@code rids} (vacuum); returns how many were removed. */
+    default int removeEntries(java.util.Set<RecordId> rids) {
+        return 0;
+    }
+
     /**
      * Finds a single matching RecordId for the given key.
      */

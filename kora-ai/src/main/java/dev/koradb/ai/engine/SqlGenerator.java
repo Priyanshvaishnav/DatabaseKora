@@ -42,19 +42,31 @@ public final class SqlGenerator {
         String userPrompt = PromptTemplates.buildSqlGenerationUserPrompt(prompt);
 
         long start = System.currentTimeMillis();
-        LlmResponse response = llmClient.complete(LlmRequest.of(systemPrompt, userPrompt));
+        LlmResponse response;
+        try {
+            response = llmClient.complete(LlmRequest.of(systemPrompt, userPrompt));
+        } catch (RuntimeException e) {
+            return TranslationResult.invalid(prompt, "", "AI provider error: " + e.getMessage(),
+                    llmClient.getProviderName(), llmClient.getModelName(), System.currentTimeMillis() - start);
+        }
         String rawContent = response.content();
         String sql = extractSql(rawContent);
 
-        // Validation against KoraDB parser
-        String parseError = validateSql(sql);
+        // Validation against the KoraDB parser and the schema (tables/columns must exist)
+        String parseError = validateSql(sql, schema);
 
-        // Self-healing attempt if parsing failed and using an external LLM
+        // Self-healing attempt if validation failed and using an external LLM
         if (parseError != null && !(llmClient instanceof RuleBasedLlmClient)) {
             String correctionPrompt = PromptTemplates.buildSqlCorrectionPrompt(prompt, sql, parseError);
-            LlmResponse retryResponse = llmClient.complete(LlmRequest.of(systemPrompt, correctionPrompt));
+            LlmResponse retryResponse;
+            try {
+                retryResponse = llmClient.complete(LlmRequest.of(systemPrompt, correctionPrompt));
+            } catch (RuntimeException e) {
+                return TranslationResult.invalid(prompt, sql, parseError + " (correction attempt failed: " + e.getMessage() + ")",
+                        llmClient.getProviderName(), llmClient.getModelName(), System.currentTimeMillis() - start);
+            }
             String retrySql = extractSql(retryResponse.content());
-            String retryError = validateSql(retrySql);
+            String retryError = validateSql(retrySql, schema);
 
             if (retryError == null) {
                 long duration = System.currentTimeMillis() - start;
@@ -103,13 +115,23 @@ public final class SqlGenerator {
      * @return null if valid, or the error message if invalid
      */
     public static String validateSql(String sql) {
+        return validateSql(sql, null);
+    }
+
+    /**
+     * Validates that {@code sql} is exactly one KoraDB statement and, when a schema is given, that
+     * every table and column it names exists (catches hallucinated tables/columns before execution).
+     *
+     * @return null if valid, or the error message if invalid
+     */
+    public static String validateSql(String sql, DatabaseSchema schema) {
         if (sql == null || sql.isBlank()) {
             return "SQL statement is empty";
         }
         try {
             List<Token> tokens = new Lexer(sql).tokenize();
-            new Parser(tokens).parse();
-            return null; // Valid
+            dev.koradb.sql.ast.Statement stmt = new Parser(tokens).parse();
+            return SqlSafety.checkAgainstSchema(stmt, schema);
         } catch (Exception e) {
             return e.getMessage();
         }

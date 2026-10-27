@@ -235,8 +235,9 @@ DiskCatalog catalog = (DiskCatalog) primaryDb.getCatalog();
 ReplicationMaster master = new ReplicationMaster(
     ReplicationMasterConfig.onPort(8766),
     catalog.getLogManager(),
-    catalog::getDatabaseTableFiles
+    catalog::snapshotFiles          // initial snapshot for new replicas
 );
+master.attachTo(primaryDb);              // needed for SYNC mode (commit waits for replica ACKs)
 master.start();
 
 // Standard writes on Primary

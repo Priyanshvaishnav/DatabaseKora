@@ -197,18 +197,40 @@ public class KoraStatement implements Statement {
         return ResultSet.TYPE_FORWARD_ONLY;
     }
 
+    /** SQL queued by addBatch(); executed one statement at a time by executeBatch(). */
+    protected final java.util.List<String> batch = new java.util.ArrayList<>();
+
     @Override
     public void addBatch(String sql) throws SQLException {
-        throw new SQLException("Batch execution is not supported in simple statements");
+        checkClosed();
+        batch.add(sql);
     }
 
     @Override
     public void clearBatch() throws SQLException {
+        batch.clear();
     }
 
+    /**
+     * Executes the queued statements in order. Within a transaction (autoCommit=false) they are part
+     * of it; on failure a BatchUpdateException reports the counts of the statements that succeeded.
+     */
     @Override
     public int[] executeBatch() throws SQLException {
-        return new int[0];
+        checkClosed();
+        int[] counts = new int[batch.size()];
+        try {
+            for (int i = 0; i < batch.size(); i++) {
+                try {
+                    counts[i] = executeUpdate(batch.get(i));
+                } catch (SQLException e) {
+                    throw new java.sql.BatchUpdateException(e.getMessage(), java.util.Arrays.copyOf(counts, i), e);
+                }
+            }
+            return counts;
+        } finally {
+            batch.clear();
+        }
     }
 
     @Override

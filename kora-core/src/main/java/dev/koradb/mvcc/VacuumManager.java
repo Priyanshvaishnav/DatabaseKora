@@ -47,7 +47,7 @@ public final class VacuumManager {
 
         int totalReclaimed = 0;
         for (Table table : catalog.listTables()) {
-            int reclaimed = table.vacuum(lowWatermark, transactionManager != null ? transactionManager::isCommitted : id -> true);
+            int reclaimed = vacuumTable(table, lowWatermark);
             totalReclaimed += reclaimed;
             log.debug("Vacuumed table '{}': {} dead version(s) reclaimed", table.getName(), reclaimed);
         }
@@ -63,6 +63,23 @@ public final class VacuumManager {
      * @param tableName table to vacuum
      * @return number of dead row versions reclaimed
      */
+    /** Vacuums one table and drops index entries that point at the reclaimed versions. */
+    private int vacuumTable(Table table, long lowWatermark) {
+        java.util.function.Predicate<Long> committed = transactionManager != null ? transactionManager::isCommitted : id -> true;
+        if (table instanceof dev.koradb.catalog.DiskTable dt) {
+            java.util.List<dev.koradb.storage.RecordId> reclaimedRids = new java.util.ArrayList<>();
+            int n = dt.getTableFile().vacuum(lowWatermark, committed, reclaimedRids);
+            if (!reclaimedRids.isEmpty()) {
+                java.util.Set<dev.koradb.storage.RecordId> set = new java.util.HashSet<>(reclaimedRids);
+                for (dev.koradb.index.Index idx : catalog.getIndexesForTable(table.getName())) {
+                    idx.removeEntries(set);
+                }
+            }
+            return n;
+        }
+        return table.vacuum(lowWatermark, committed);
+    }
+
     public int vacuum(String tableName) {
         Table table = catalog.getTable(tableName);
         long lowWatermark;
@@ -75,7 +92,7 @@ public final class VacuumManager {
             lowWatermark = Long.MAX_VALUE;
         }
 
-        int reclaimed = table.vacuum(lowWatermark, transactionManager != null ? transactionManager::isCommitted : id -> true);
+        int reclaimed = vacuumTable(table, lowWatermark);
         log.info("Vacuumed table '{}': {} dead version(s) reclaimed", tableName, reclaimed);
         return reclaimed;
     }

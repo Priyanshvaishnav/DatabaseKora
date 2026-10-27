@@ -83,6 +83,7 @@ public final class Lexer {
             Map.entry("DOUBLE",    TokenType.DOUBLE),
             Map.entry("TIMESTAMP", TokenType.TIMESTAMP),
             Map.entry("TRUE",      TokenType.TRUE),
+            Map.entry("NULL",      TokenType.NULL),
             Map.entry("FALSE",     TokenType.FALSE),
             Map.entry("AND",       TokenType.AND),
             Map.entry("OR",        TokenType.OR),
@@ -251,6 +252,19 @@ public final class Lexer {
             isDouble = true;
             advance(); // consume '.'
             while (!isAtEnd() && isDigit(peek())) advance();
+        }
+
+        // Optional exponent: 1.5E3, 2e-4, 7E+10 (scientific notation, e.g. from Double.toString)
+        if (!isAtEnd() && (peek() == 'e' || peek() == 'E')) {
+            int save = current;
+            advance(); // e / E
+            if (!isAtEnd() && (peek() == '+' || peek() == '-')) advance();
+            if (!isAtEnd() && isDigit(peek())) {
+                while (!isAtEnd() && isDigit(peek())) advance();
+                isDouble = true;
+            } else {
+                current = save; // not an exponent ("1e" followed by something else)
+            }
         }
 
         String text = source.substring(start, current);

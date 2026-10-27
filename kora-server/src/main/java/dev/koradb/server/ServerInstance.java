@@ -75,6 +75,7 @@ public final class ServerInstance implements AutoCloseable {
                         .toList());
             }
             observabilityEngine.bindTransactionManager(db.getTransactionManager());
+            observabilityEngine.bindQueries(db);
 
             try {
                 this.metricsServer = observabilityEngine.startHttpExporter(
@@ -90,21 +91,7 @@ public final class ServerInstance implements AutoCloseable {
         // 3. Initialize replication according to role
         if (config.role() == NodeRole.PRIMARY) {
             if (db.getCatalog() instanceof DiskCatalog dc) {
-                Function<String, Map<String, byte[]>> snapshotSupplier = dbName -> {
-                    Map<String, byte[]> files = new HashMap<>();
-                    Path dbDir = dc.getDataDir().resolve(dbName);
-                    if (Files.exists(dbDir)) {
-                        try (var stream = Files.walk(dbDir)) {
-                            stream.filter(Files::isRegularFile).forEach(p -> {
-                                try {
-                                    String rel = dc.getDataDir().relativize(p).toString().replace('\\', '/');
-                                    files.put(rel, Files.readAllBytes(p));
-                                } catch (IOException ignored) {}
-                            });
-                        } catch (IOException ignored) {}
-                    }
-                    return files;
-                };
+                Function<String, Map<String, byte[]>> snapshotSupplier = dc::snapshotFiles;
 
                 // The replication stream carries ONE database's WAL. Open it before attaching the
                 // master (its LogManager only exists once the database is open), creating it on a

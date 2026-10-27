@@ -45,10 +45,32 @@ public final class KoraCli {
     private String currentDatabase;
     private KoraAiEngine aiEngine = new KoraAiEngine();
 
+    /** Banner for consoles whose character set cannot show the block characters (e.g. Windows code page 437/1252). */
+    public static final String ASCII_BANNER = """
+             _  __                ____  ____
+            | |/ /___  _ __ __ _ |  _ \\| __ )
+            | ' // _ \\| '__/ _` || | | |  _ \\
+            | . \\ (_) | | | (_| || |_| | |_) |
+            |_|\\_\\___/|_|  \\__,_||____/|____/
+            Welcome to KoraDB CLI (v0.1.0-SNAPSHOT)
+            Type \\h or \\help for help. Type \\q to exit.
+            """;
+
+    private final java.nio.charset.Charset outCharset;
+
     public KoraCli(CliConfig config, InputStream in, PrintStream out) {
+        this(config, in, out, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * @param charset character set of the console: used to decode typed input; output falls back
+     *                to ASCII decorations when the charset cannot show box/block characters
+     */
+    public KoraCli(CliConfig config, InputStream in, PrintStream out, java.nio.charset.Charset charset) {
         this.config = config;
-        this.reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
+        this.reader = new BufferedReader(new InputStreamReader(in, charset));
         this.out = out;
+        this.outCharset = charset;
         this.currentDatabase = config.database() != null ? config.database().trim() : "";
     }
 
@@ -98,7 +120,7 @@ public final class KoraCli {
     }
 
     public int runRepl(KoraClient client) {
-        out.println(BANNER);
+        out.println(outCharset.newEncoder().canEncode("█╗═") ? BANNER : ASCII_BANNER);
         out.printf("Connected to %s:%d (connId=%d)%n%n",
                 config.host(), config.port(), client.getConnectionId());
 

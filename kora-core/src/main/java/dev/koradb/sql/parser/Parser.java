@@ -19,7 +19,10 @@ import static dev.koradb.sql.lexer.TokenType.*;
  *
  * <h2>Design</h2>
  * <ul>
- *   <li>One public method {@link #parse()} per call — parses exactly one statement.</li>
+ *   <li>{@link #parse()} parses exactly one statement (backward-compatible).</li>
+ *   <li>{@link #parseAll()} parses a multi-statement script separated by semicolons,
+ *       returning all statements as a list. This enables SQL editors (e.g. DBeaver)
+ *       to send a batch of statements in a single request.</li>
  *   <li>One private method per grammar rule, named after that rule.</li>
  *   <li>The parser peeks at the current token to decide which rule to apply,
  *       and consumes tokens by calling {@link #consume(TokenType, String)}.</li>
@@ -85,6 +88,38 @@ public final class Parser {
         return stmt;
     }
 
+    /**
+     * Parses all SQL statements from the token stream, separated by semicolons.
+     * Enables multi-statement scripts (e.g. from DBeaver or CLI scripts).
+     *
+     * <pre>
+     *   CREATE TABLE users (id INT, name VARCHAR);
+     *   INSERT INTO users VALUES (1, 'Alice');
+     *   SELECT * FROM users;
+     * </pre>
+     *
+     * @return ordered list of all parsed {@link Statement} AST nodes (never empty)
+     * @throws ParseException if any statement in the script cannot be parsed
+     */
+    public List<Statement> parseAll() {
+        log.debug("Parsing multi-statement script ({} token(s))", tokens.size());
+        List<Statement> statements = new ArrayList<>();
+
+        // Skip any leading semicolons / blank lines
+        while (check(SEMICOLON)) advance();
+
+        while (!isAtEnd()) {
+            statements.add(statement());
+            // Consume semicolons between statements
+            while (check(SEMICOLON)) advance();
+        }
+
+        if (statements.isEmpty()) {
+            throw new ParseException("No statements found in input", 0);
+        }
+        return statements;
+    }
+
     // =========================================================================
     // Statement dispatch
     // =========================================================================
@@ -104,6 +139,12 @@ public final class Parser {
             case BEGIN    -> parseBegin();
             case COMMIT   -> parseCommit();
             case ROLLBACK -> parseRollback();
+            case DESC     -> parseDescribe();
+            case IDENTIFIER -> {
+                if (token.lexeme().equalsIgnoreCase("SHOW")) yield parseShow();
+                if (token.lexeme().equalsIgnoreCase("DESCRIBE")) yield parseDescribe();
+                throw new ParseException("Expected a SQL statement but found: '" + token.lexeme() + "'", token.line());
+            }
             default       -> throw new ParseException(
                     "Expected a SQL statement but found: '" + token.lexeme() + "'",
                     token.line());
@@ -389,6 +430,10 @@ public final class Parser {
             case MAX   -> aggType = AggregateType.MAX;
             default    -> {}
         }
+        // "count" without "(" is an ordinary column name
+        if (aggType != null && (current + 1 >= tokens.size() || tokens.get(current + 1).type() != LPAREN)) {
+            aggType = null;
+        }
 
         if (aggType != null) {
             advance(); // consume aggregate keyword
@@ -562,6 +607,26 @@ public final class Parser {
         return new CommitStmt();
     }
 
+    // SHOW TABLES | SHOW DATABASES  ("TABLES"/"DATABASES" are not reserved words)
+    private ShowStmt parseShow() {
+        advance(); // SHOW
+        Token what = peek();
+        String w = what.lexeme() == null ? "" : what.lexeme().toUpperCase(java.util.Locale.ROOT);
+        ShowStmt stmt = switch (w) {
+            case "TABLES"    -> new ShowStmt(ShowStmt.Kind.TABLES, null);
+            case "DATABASES" -> new ShowStmt(ShowStmt.Kind.DATABASES, null);
+            default -> throw new ParseException("Expected TABLES or DATABASES after SHOW but found: '" + what.lexeme() + "'", what.line());
+        };
+        advance();
+        return stmt;
+    }
+
+    // DESCRIBE <table> | DESC <table>
+    private ShowStmt parseDescribe() {
+        advance(); // DESCRIBE / DESC
+        return new ShowStmt(ShowStmt.Kind.COLUMNS, consumeIdentifier("table name"));
+    }
+
     private RollbackStmt parseRollback() {
         consume(ROLLBACK, "ROLLBACK");
         if (check(TRANSACTION)) {
@@ -637,6 +702,32 @@ public final class Parser {
      */
     private LiteralExpr parseLiteral() {
         Token token = peek();
+        if (token.type() == MINUS) {
+            // Negative numeric literal: -5, -2.5, -1E3
+            advance();
+            Token num = peek();
+            return switch (num.type()) {
+                case LITERAL_INT -> {
+                    advance();
+                    yield new LiteralExpr(-Integer.parseInt(num.lexeme()));
+                }
+                case LITERAL_LONG -> {
+                    advance();
+                    long v = -Long.parseLong(num.lexeme());
+                    yield (v >= Integer.MIN_VALUE) ? new LiteralExpr((int) v) : new LiteralExpr(v);
+                }
+                case LITERAL_DOUBLE -> {
+                    advance();
+                    yield new LiteralExpr(-Double.parseDouble(num.lexeme()));
+                }
+                default -> throw new ParseException(
+                        "Expected a number after '-' but found: '" + num.lexeme() + "'", num.line());
+            };
+        }
+        if (token.type() == NULL) {
+            advance();
+            return new LiteralExpr(null);
+        }
 
         return switch (token.type()) {
             case LITERAL_INT -> {
