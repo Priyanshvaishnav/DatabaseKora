@@ -115,7 +115,9 @@ public final class ReplicationReplica implements AutoCloseable {
                 || stmt instanceof CreateIndexStmt
                 || stmt instanceof DropIndexStmt
                 || stmt instanceof CreateDatabaseStmt
-                || stmt instanceof DropDatabaseStmt;
+                || stmt instanceof DropDatabaseStmt
+                || stmt instanceof TruncateStmt
+                || stmt instanceof AlterTableStmt;
     }
 
     private void unpackSnapshot(Map<String, byte[]> files) {

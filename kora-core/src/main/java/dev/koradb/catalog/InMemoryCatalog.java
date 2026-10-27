@@ -111,6 +111,18 @@ public final class InMemoryCatalog implements Catalog {
     }
 
     @Override
+    public void addColumn(String tableName, dev.koradb.sql.ast.ColumnDef column) {
+        Table t = getTable(tableName);
+        if (t.getSchema().hasColumn(column.name())) {
+            throw new SchemaException("Column '%s' already exists in table '%s'".formatted(column.name(), tableName));
+        }
+        if (column.notNull() && !t.getRows().isEmpty()) {
+            throw new SchemaException("Cannot add NOT NULL column '%s' to non-empty table '%s'".formatted(column.name(), tableName));
+        }
+        t.setSchema(t.getSchema().withColumn(column));
+    }
+
+    @Override
     public void dropTable(String tableName) {
         Database db = requireCurrentDatabase();
         if (!db.hasTable(tableName)) {

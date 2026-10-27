@@ -16,12 +16,30 @@ public record SelectItem(
         String expression,
         String alias,
         AggregateType aggregateType,
-        String aggregateColumn
+        String aggregateColumn,
+        Expression valueExpr
 ) {
     public SelectItem {
         if (alias == null || alias.isBlank()) {
             alias = expression;
         }
+    }
+
+    public SelectItem(String expression, String alias, AggregateType aggregateType, String aggregateColumn) {
+        this(expression, alias, aggregateType, aggregateColumn, null);
+    }
+
+    /**
+     * A computed item ({@code price * 2}, {@code 1}, {@code (SELECT MAX(x) FROM t)}): {@code text} is its
+     * SQL text, used as the column name when there is no alias.
+     */
+    public static SelectItem computed(Expression expr, String text, String alias) {
+        return new SelectItem(text, alias != null ? alias : text, null, null, expr);
+    }
+
+    /** True for a computed item (evaluated per row rather than read from a column). */
+    public boolean isComputed() {
+        return valueExpr != null;
     }
 
     /** Simple column constructor. */

@@ -87,7 +87,16 @@ public final class Lexer {
             Map.entry("FALSE",     TokenType.FALSE),
             Map.entry("AND",       TokenType.AND),
             Map.entry("OR",        TokenType.OR),
-            Map.entry("NOT",       TokenType.NOT)
+            Map.entry("NOT",       TokenType.NOT),
+            Map.entry("IN",        TokenType.IN),
+            Map.entry("LIKE",      TokenType.LIKE),
+            Map.entry("BETWEEN",   TokenType.BETWEEN),
+            Map.entry("IS",        TokenType.IS),
+            Map.entry("DISTINCT",  TokenType.DISTINCT),
+            Map.entry("HAVING",    TokenType.HAVING),
+            Map.entry("LEFT",      TokenType.LEFT),
+            Map.entry("OUTER",     TokenType.OUTER),
+            Map.entry("EXISTS",    TokenType.EXISTS)
     );
 
     private final String source;
@@ -144,6 +153,8 @@ public final class Lexer {
             case '+'  -> addToken(TokenType.PLUS,      "+");
             case '/'  -> addToken(TokenType.SLASH,     "/");
             case '*'  -> addToken(TokenType.STAR,      "*");
+            case '%'  -> addToken(TokenType.PERCENT,   "%");
+            case '"'  -> scanQuotedIdentifier();
 
             // Minus: could start a single-line comment "--"
             case '-'  -> {
@@ -166,7 +177,9 @@ public final class Lexer {
                 }
             }
             case '<'  -> {
-                if (match('=')) {
+                if (match('>')) {
+                    addToken(TokenType.NEQ, "<>");
+                } else if (match('=')) {
                     addToken(TokenType.LTE, "<=");
                 } else {
                     addToken(TokenType.LT, "<");
@@ -209,6 +222,39 @@ public final class Lexer {
      * The produced token's lexeme is the content WITHOUT surrounding quotes.
      * Escaped single quotes ({@code ''}) are properly supported.
      */
+    /**
+     * Scans a double-quoted identifier ({@code "order"}, {@code "Total Amount"}). The lexeme is the
+     * name without quotes, case preserved; {@code ""} inside stands for one quote. Quoting lets a
+     * reserved word be used as a name.
+     */
+    private void scanQuotedIdentifier() {
+        int startLine = line;
+        StringBuilder content = new StringBuilder();
+        while (!isAtEnd()) {
+            char c = peek();
+            if (c == '"') {
+                if (peekNext() == '"') {
+                    content.append('"');
+                    advance();
+                    advance();
+                    continue;
+                }
+                break;
+            }
+            if (c == '\n') line++;
+            content.append(c);
+            advance();
+        }
+        if (isAtEnd()) {
+            throw new ParseException("Unterminated quoted identifier", startLine);
+        }
+        advance(); // closing quote
+        if (content.length() == 0) {
+            throw new ParseException("Empty quoted identifier", startLine);
+        }
+        addToken(TokenType.IDENTIFIER, content.toString());
+    }
+
     private void scanStringLiteral() {
         int startLine = line;
         StringBuilder content = new StringBuilder();

@@ -89,6 +89,15 @@ public enum TokenType {
     AND,
     OR,
     NOT,
+    IN,
+    LIKE,
+    BETWEEN,
+    IS,
+    DISTINCT,
+    HAVING,
+    LEFT,
+    OUTER,
+    EXISTS,
 
     // -------------------------------------------------------------------------
     // Comparison operators
@@ -101,12 +110,13 @@ public enum TokenType {
     GTE,      // >=
 
     // -------------------------------------------------------------------------
-    // Arithmetic (future use)
+    // Arithmetic
     // -------------------------------------------------------------------------
     PLUS,     // +
     MINUS,    // -
     STAR,     // *   (also used in SELECT *)
     SLASH,    // /
+    PERCENT,  // %
 
     // -------------------------------------------------------------------------
     // Punctuation

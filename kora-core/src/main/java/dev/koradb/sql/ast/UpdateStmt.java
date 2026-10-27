@@ -27,7 +27,7 @@ public record UpdateStmt(
      * A single {@code column = value} assignment in a SET clause.
      *
      * @param columnName the column to update
-     * @param value      the new value (a literal expression)
+     * @param value      the new value: a literal or an expression over the row ({@code age + 1})
      */
-    public record Assignment(String columnName, LiteralExpr value) {}
+    public record Assignment(String columnName, Expression value) {}
 }

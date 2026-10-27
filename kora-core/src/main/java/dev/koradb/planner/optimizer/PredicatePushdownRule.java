@@ -3,9 +3,8 @@ package dev.koradb.planner.optimizer;
 import dev.koradb.catalog.Catalog;
 import dev.koradb.catalog.Schema;
 import dev.koradb.planner.logical.*;
-import dev.koradb.sql.ast.BinaryExpr;
-import dev.koradb.sql.ast.ColumnRefExpr;
 import dev.koradb.sql.ast.Expression;
+import dev.koradb.sql.ast.ExpressionUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -41,11 +40,11 @@ public final class PredicatePushdownRule implements Rule {
 
     private LogicalPlanNode pushDownFilter(LogicalFilter filter, Catalog catalog) {
         LogicalPlanNode child = filter.child();
-        List<BinaryExpr> predicates = filter.predicates();
+        List<Expression> predicates = filter.predicates();
 
         // 1. Filter over Filter: merge predicates
         if (child instanceof LogicalFilter innerFilter) {
-            List<BinaryExpr> merged = new ArrayList<>(innerFilter.predicates());
+            List<Expression> merged = new ArrayList<>(innerFilter.predicates());
             merged.addAll(predicates);
             return apply(new LogicalFilter(innerFilter.child(), merged), catalog);
         }
@@ -58,11 +57,11 @@ public final class PredicatePushdownRule implements Rule {
 
         // 3. Filter over Join: split predicates to left, right, and join
         if (child instanceof LogicalJoin join) {
-            List<BinaryExpr> leftPreds = new ArrayList<>();
-            List<BinaryExpr> rightPreds = new ArrayList<>();
-            List<BinaryExpr> remainPreds = new ArrayList<>();
+            List<Expression> leftPreds = new ArrayList<>();
+            List<Expression> rightPreds = new ArrayList<>();
+            List<Expression> remainPreds = new ArrayList<>();
 
-            for (BinaryExpr pred : predicates) {
+            for (Expression pred : predicates) {
                 List<String> cols = new ArrayList<>();
                 extractColumns(pred, cols);
 
@@ -71,7 +70,9 @@ public final class PredicatePushdownRule implements Rule {
 
                 if (canLeft && !canRight) {
                     leftPreds.add(pred);
-                } else if (canRight && !canLeft) {
+                } else if (canRight && !canLeft && join.joinType() != dev.koradb.planner.logical.JoinType.LEFT) {
+                    // Below a LEFT JOIN a right-side predicate would turn non-matches into NULL rows
+                    // instead of removing them, so it stays above the join.
                     rightPreds.add(pred);
                 } else {
                     // Predicate references both sides (or neither, e.g. cross-predicate)
@@ -97,7 +98,7 @@ public final class PredicatePushdownRule implements Rule {
 
         // 4. Filter over Scan: push predicates directly into LogicalScan
         if (child instanceof LogicalScan scan) {
-            List<BinaryExpr> merged = new ArrayList<>(scan.pushedPredicates());
+            List<Expression> merged = new ArrayList<>(scan.pushedPredicates());
             merged.addAll(predicates);
             return scan.withPushedPredicates(merged);
         }
@@ -108,35 +109,16 @@ public final class PredicatePushdownRule implements Rule {
     }
 
     private static void extractColumns(Expression expr, List<String> columns) {
-        if (expr instanceof ColumnRefExpr col) {
-            columns.add(col.columnName());
-        } else if (expr instanceof BinaryExpr bin) {
-            extractColumns(bin.left(), columns);
-            extractColumns(bin.right(), columns);
-        }
+        ExpressionUtils.collectColumns(expr, columns);
     }
 
     private static boolean allColumnsMatch(List<String> columns, LogicalPlanNode node) {
         if (columns.isEmpty()) {
             return false;
         }
-        Schema schema = node.getSchema();
-        String tableName = node instanceof LogicalScan scan ? scan.tableName() : null;
-
         for (String col : columns) {
-            if (col.contains(".")) {
-                String prefix = col.substring(0, col.indexOf('.'));
-                String name = col.substring(col.indexOf('.') + 1);
-                if (tableName != null && !tableName.equalsIgnoreCase(prefix)) {
-                    return false;
-                }
-                if (!schema.hasColumn(name) && !schema.hasColumn(col)) {
-                    return false;
-                }
-            } else {
-                if (!schema.hasColumn(col)) {
-                    return false;
-                }
+            if (!dev.koradb.planner.physical.PhysicalPlanner.columnBelongsToSide(col, node)) {
+                return false;
             }
         }
         return true;

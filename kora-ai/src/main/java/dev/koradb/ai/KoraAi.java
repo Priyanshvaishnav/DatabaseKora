@@ -185,6 +185,8 @@ public final class KoraAi implements AutoCloseable {
                 prompt.toLowerCase(java.util.Locale.ROOT).split("[^a-z]+")));
         java.util.List<String> needed = switch (stmt) {
             case dev.koradb.sql.ast.DeleteStmt s -> java.util.List.of("delete", "remove", "erase", "purge", "clear");
+            case dev.koradb.sql.ast.TruncateStmt s -> java.util.List.of("truncate", "delete", "remove", "empty", "clear", "purge");
+            case dev.koradb.sql.ast.AlterTableStmt s -> java.util.List.of("alter", "add", "column");
             case dev.koradb.sql.ast.UpdateStmt s -> java.util.List.of("update", "set", "change", "modify", "mark", "rename");
             case dev.koradb.sql.ast.InsertStmt s -> java.util.List.of("insert", "add", "create", "record", "register", "new");
             case dev.koradb.sql.ast.DropTableStmt s -> java.util.List.of("drop", "delete", "remove");

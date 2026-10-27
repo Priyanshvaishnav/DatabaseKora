@@ -17,13 +17,17 @@ public final class LogicalAggregate implements LogicalPlanNode {
 
     private final LogicalPlanNode child;
     private final List<SelectItem> selectItems;
-    private final Optional<String> groupBy;
+    private final List<String> groupByColumns;
     private final Schema schema;
 
     public LogicalAggregate(LogicalPlanNode child, List<SelectItem> selectItems, Optional<String> groupBy) {
+        this(child, selectItems, groupBy != null && groupBy.isPresent() ? List.of(groupBy.get()) : List.of());
+    }
+
+    public LogicalAggregate(LogicalPlanNode child, List<SelectItem> selectItems, List<String> groupByColumns) {
         this.child = Objects.requireNonNull(child);
         this.selectItems = List.copyOf(Objects.requireNonNull(selectItems));
-        this.groupBy = groupBy != null ? groupBy : Optional.empty();
+        this.groupByColumns = groupByColumns != null ? List.copyOf(groupByColumns) : List.of();
         this.schema = computeSchema(child.getSchema(), this.selectItems);
     }
 
@@ -35,8 +39,13 @@ public final class LogicalAggregate implements LogicalPlanNode {
         return selectItems;
     }
 
+    /** The first GROUP BY column, if any. */
     public Optional<String> groupBy() {
-        return groupBy;
+        return groupByColumns.isEmpty() ? Optional.empty() : Optional.of(groupByColumns.get(0));
+    }
+
+    public List<String> groupByColumns() {
+        return groupByColumns;
     }
 
     private static Schema computeSchema(Schema childSchema, List<SelectItem> items) {
@@ -45,10 +54,14 @@ public final class LogicalAggregate implements LogicalPlanNode {
             if (item.isAggregate()) {
                 DataType type = switch (item.aggregateType()) {
                     case COUNT -> DataType.BIGINT;
-                    case SUM, AVG -> DataType.DOUBLE;
+                    case AVG -> DataType.DOUBLE;
+                    case SUM -> {
+                        ColumnDef cd = childSchema.findColumn(item.aggregateColumn());
+                        yield cd != null && (cd.dataType() == DataType.INT || cd.dataType() == DataType.BIGINT)
+                                ? DataType.BIGINT : DataType.DOUBLE;
+                    }
                     case MIN, MAX -> {
-                        String col = item.expression();
-                        ColumnDef cd = childSchema.findColumn(col);
+                        ColumnDef cd = childSchema.findColumn(item.aggregateColumn());
                         yield cd != null ? cd.dataType() : DataType.DOUBLE;
                     }
                 };
@@ -77,19 +90,19 @@ public final class LogicalAggregate implements LogicalPlanNode {
         if (newChildren.size() != 1) {
             throw new IllegalArgumentException("LogicalAggregate must have exactly 1 child, got: " + newChildren.size());
         }
-        return new LogicalAggregate(newChildren.get(0), selectItems, groupBy);
+        return new LogicalAggregate(newChildren.get(0), selectItems, groupByColumns);
     }
 
     @Override
     public void explain(StringBuilder sb, String prefix, boolean isTail) {
         sb.append(prefix).append(isTail ? "└── " : "├── ")
-                .append("LogicalAggregate [groupBy=").append(groupBy.orElse("none"))
+                .append("LogicalAggregate [groupBy=").append(groupByColumns.isEmpty() ? "none" : String.join(", ", groupByColumns))
                 .append(", items=").append(selectItems).append("]\n");
         child.explain(sb, prefix + (isTail ? "    " : "│   "), true);
     }
 
     @Override
     public String toString() {
-        return "LogicalAggregate(groupBy=" + groupBy.orElse("none") + ", " + selectItems + ")";
+        return "LogicalAggregate(groupBy=" + groupByColumns + ", " + selectItems + ")";
     }
 }

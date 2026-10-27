@@ -3,7 +3,7 @@ package dev.koradb.execution.operator;
 import dev.koradb.catalog.Row;
 import dev.koradb.catalog.Schema;
 import dev.koradb.execution.ExpressionEvaluator;
-import dev.koradb.sql.ast.BinaryExpr;
+import dev.koradb.sql.ast.Expression;
 import dev.koradb.sql.ast.WhereClause;
 
 import java.util.List;
@@ -17,7 +17,7 @@ import java.util.List;
 public class FilterOperator implements Operator {
 
     private final Operator child;
-    private final List<BinaryExpr> predicates;
+    private final List<Expression> predicates;
     private final ExpressionEvaluator evaluator;
 
     public FilterOperator(Operator child, WhereClause where, ExpressionEvaluator evaluator) {
@@ -26,7 +26,7 @@ public class FilterOperator implements Operator {
         this.evaluator = evaluator;
     }
 
-    public FilterOperator(Operator child, List<BinaryExpr> predicates, ExpressionEvaluator evaluator) {
+    public FilterOperator(Operator child, List<Expression> predicates, ExpressionEvaluator evaluator) {
         this.child = child;
         this.predicates = predicates != null ? List.copyOf(predicates) : List.of();
         this.evaluator = evaluator;
@@ -50,7 +50,7 @@ public class FilterOperator implements Operator {
 
     private boolean matches(Row row) {
         if (predicates.isEmpty()) return true;
-        for (BinaryExpr pred : predicates) {
+        for (Expression pred : predicates) {
             if (!evaluator.evaluate(pred, row)) {
                 return false;
             }

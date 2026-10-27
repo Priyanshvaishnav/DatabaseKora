@@ -100,10 +100,10 @@ LlmClient ollama = LlmClientFactory.create("openai", Map.of(
 
 ### Dialect Rules Injection
 Large Language Models trained on open-source code often produce SQL syntax specific to PostgreSQL, MySQL, or SQLite. KoraDB's SQL compiler enforces a lean, performant ANSI SQL subset. To prevent invalid queries before they reach the parser, [`DialectRules`](file:///d:/Projects/DB/kora-db/kora-ai/src/main/java/dev/koradb/ai/prompt/DialectRules.java) grounds every LLM prompt with KoraDB-specific constraints:
-- Supported statements: `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `CREATE TABLE`, `CREATE INDEX`, `DROP TABLE`.
-- Expressions: arithmetic, comparisons (`=`, `!=`, `<`, `<=`, `>`, `>=`), logical operators (`AND`, `OR`, `NOT`), `LIKE`, `IN`, `IS NULL`, `IS NOT NULL`.
-- Aggregates: `COUNT(*)`, `SUM(col)`, `AVG(col)`, `MIN(col)`, `MAX(col)`.
-- Constraints: All `SELECT` queries must include a `FROM` clause; table aliases (e.g. `FROM users u`) and subqueries are forbidden.
+- Supported statements: `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `CREATE TABLE`, `ALTER TABLE ADD COLUMN`, `CREATE INDEX`, `DROP TABLE`.
+- Expressions: arithmetic, comparisons (`=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`), `AND`, `OR`, `NOT`, `LIKE`, `IN`, `BETWEEN`, `IS [NOT] NULL`, uncorrelated subqueries.
+- Aggregates: `COUNT(*)`, `SUM(col)`, `AVG(col)`, `MIN(col)`, `MAX(col)`, with `GROUP BY` on several columns and `HAVING`.
+- Joins: `[INNER] JOIN` and `LEFT JOIN`, with table aliases. Not supported: other SQL functions, `RIGHT`/`FULL` joins, and `INSERT ... SELECT`.
 
 ### 1-Shot Self-Healing Feedback Loop
 When translating natural language into SQL, the [`SqlGenerator`](file:///d:/Projects/DB/kora-db/kora-ai/src/main/java/dev/koradb/ai/engine/SqlGenerator.java) executes a real-time verification step using KoraDB's internal [`Parser`](file:///d:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/core/parser/Parser.java):

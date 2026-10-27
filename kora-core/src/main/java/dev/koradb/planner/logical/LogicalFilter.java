@@ -1,7 +1,7 @@
 package dev.koradb.planner.logical;
 
 import dev.koradb.catalog.Schema;
-import dev.koradb.sql.ast.BinaryExpr;
+import dev.koradb.sql.ast.Expression;
 
 import java.util.List;
 import java.util.Objects;
@@ -12,9 +12,9 @@ import java.util.Objects;
 public final class LogicalFilter implements LogicalPlanNode {
 
     private final LogicalPlanNode child;
-    private final List<BinaryExpr> predicates;
+    private final List<Expression> predicates;
 
-    public LogicalFilter(LogicalPlanNode child, List<BinaryExpr> predicates) {
+    public LogicalFilter(LogicalPlanNode child, List<Expression> predicates) {
         this.child = Objects.requireNonNull(child);
         this.predicates = predicates != null ? List.copyOf(predicates) : List.of();
     }
@@ -23,7 +23,7 @@ public final class LogicalFilter implements LogicalPlanNode {
         return child;
     }
 
-    public List<BinaryExpr> predicates() {
+    public List<Expression> predicates() {
         return predicates;
     }
 

@@ -93,18 +93,29 @@ public final class StatementExecutor {
             case CreateIndexStmt    s -> executeCreateIndex(s, catalog);
             case DropIndexStmt      s -> executeDropIndex(s, catalog);
             case InsertStmt         s -> executeInsert(s, catalog, txn, lockManager, txnManager);
-            case SelectStmt         s -> executeSelect(s, catalog, txn, lockManager, txnManager);
-            case UpdateStmt         s -> executeUpdate(s, catalog, txn, lockManager, txnManager);
-            case DeleteStmt         s -> executeDelete(s, catalog, txn, lockManager, txnManager);
+            case SelectStmt         s -> executeSelect(subqueries(catalog, txn, lockManager, txnManager).resolve(s), catalog, txn, lockManager, txnManager);
+            case UpdateStmt         s -> executeUpdate(subqueries(catalog, txn, lockManager, txnManager).resolve(s), catalog, txn, lockManager, txnManager);
+            case DeleteStmt         s -> executeDelete(subqueries(catalog, txn, lockManager, txnManager).resolve(s), catalog, txn, lockManager, txnManager);
             case ExplainStmt        s -> executeExplain(s, catalog, txn, lockManager);
             case BeginStmt          s -> QueryResult.ddl();
             case CommitStmt         s -> QueryResult.ddl();
             case RollbackStmt       s -> QueryResult.ddl();
             case ShowStmt           s -> executeShow(s, catalog);
+            case TruncateStmt       s -> executeDelete(new DeleteStmt(s.tableName(), Optional.empty()), catalog, txn, lockManager, txnManager);
+            case AlterTableStmt     s -> executeAlterTable(s, catalog, txn, lockManager);
         };
     }
 
+    /** Runs uncorrelated subqueries of a statement (each once, in this transaction) and inlines their results. */
+    private SubqueryResolver subqueries(Catalog catalog, Transaction txn, LockManager lockManager, TransactionManager txnManager) {
+        return new SubqueryResolver(sub -> executeSelect(subqueries(catalog, txn, lockManager, txnManager).resolve(sub),
+                catalog, txn, lockManager, txnManager));
+    }
+
     private QueryResult executeExplain(ExplainStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
+        if (stmt.statement() instanceof SelectStmt sel) {
+            stmt = new ExplainStmt(subqueries(catalog, txn, lockManager, null).resolve(sel), stmt.analyze());
+        }
         if (txn != null && lockManager != null && txn.getIsolationLevel() == IsolationLevel.SERIALIZABLE && stmt.statement() instanceof SelectStmt selectStmt) {
             lockManager.acquireShared(txn.getId(), LockResource.table(selectStmt.tableName()));
             if (selectStmt.join().isPresent()) {
@@ -120,15 +131,34 @@ public final class StatementExecutor {
     // =========================================================================
 
     private QueryResult executeCreateDatabase(CreateDatabaseStmt stmt, Catalog catalog) {
+        if (stmt.ifNotExists() && databaseExists(catalog, stmt.databaseName())) {
+            return QueryResult.ddl();
+        }
         catalog.createDatabase(stmt.databaseName());
         log.info("Database '{}' created", stmt.databaseName());
         return QueryResult.ddl();
     }
 
     private QueryResult executeDropDatabase(DropDatabaseStmt stmt, Catalog catalog) {
+        if (stmt.ifExists() && !databaseExists(catalog, stmt.databaseName())) {
+            return QueryResult.ddl();
+        }
         catalog.dropDatabase(stmt.databaseName());
         log.info("Database '{}' dropped", stmt.databaseName());
         return QueryResult.ddl();
+    }
+
+    private static boolean databaseExists(Catalog catalog, String name) {
+        return catalog.listDatabases().stream().anyMatch(d -> d.equalsIgnoreCase(name));
+    }
+
+    private static boolean tableExists(Catalog catalog, String name) {
+        try {
+            catalog.getTable(name);
+            return true;
+        } catch (SchemaException e) {
+            return false;
+        }
     }
 
     private QueryResult executeUseDatabase(UseDatabaseStmt stmt, Catalog catalog) {
@@ -138,17 +168,40 @@ public final class StatementExecutor {
     }
 
     private QueryResult executeCreateTable(CreateTableStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
+        if (stmt.ifNotExists() && tableExists(catalog, stmt.tableName())) {
+            return QueryResult.ddl();
+        }
         if (txn != null && lockManager != null) {
             lockManager.acquireExclusive(txn.getId(), LockResource.table(stmt.tableName()));
+        }
+        // constraint indexes: PRIMARY KEY -> "<table>_pkey", UNIQUE -> "<table>_<col>_key"
+        Map<String, String> constraintIndexes = new LinkedHashMap<>();
+        if (stmt.primaryKey() != null) {
+            constraintIndexes.put(stmt.tableName() + "_pkey", stmt.primaryKey());
+        }
+        for (String u : stmt.uniqueColumns()) {
+            if (u.equalsIgnoreCase(stmt.primaryKey())) continue;
+            constraintIndexes.putIfAbsent(stmt.tableName() + "_" + u + "_key", u);
+        }
+        for (String idxName : constraintIndexes.keySet()) {
+            if (catalog.getIndex(idxName).isPresent()) {
+                throw new SchemaException("Index '%s' (for a constraint of table '%s') already exists".formatted(idxName, stmt.tableName()));
+            }
         }
         Schema schema = new Schema(stmt.columnDefs());
         Table  table  = new Table(stmt.tableName(), schema);
         catalog.createTable(table);
+        for (Map.Entry<String, String> e : constraintIndexes.entrySet()) {
+            catalog.createIndex(e.getKey(), stmt.tableName(), e.getValue(), true);
+        }
         log.info("Table '{}' created", stmt.tableName());
         return QueryResult.ddl();
     }
 
     private QueryResult executeDropTable(DropTableStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
+        if (stmt.ifExists() && !tableExists(catalog, stmt.tableName())) {
+            return QueryResult.ddl();
+        }
         if (txn != null && lockManager != null) {
             lockManager.acquireExclusive(txn.getId(), LockResource.table(stmt.tableName()));
         }
@@ -157,13 +210,27 @@ public final class StatementExecutor {
         return QueryResult.ddl();
     }
 
+    private QueryResult executeAlterTable(AlterTableStmt stmt, Catalog catalog, Transaction txn, LockManager lockManager) {
+        if (txn != null && lockManager != null) {
+            lockManager.acquireExclusive(txn.getId(), LockResource.table(stmt.tableName()));
+        }
+        catalog.addColumn(stmt.tableName(), stmt.addColumn());
+        return QueryResult.ddl();
+    }
+
     private QueryResult executeCreateIndex(CreateIndexStmt stmt, Catalog catalog) {
+        if (stmt.ifNotExists() && catalog.getIndex(stmt.indexName()).isPresent()) {
+            return QueryResult.ddl();
+        }
         catalog.createIndex(stmt.indexName(), stmt.tableName(), stmt.columnName(), stmt.unique());
         log.info("Index '{}' created on {}({})", stmt.indexName(), stmt.tableName(), stmt.columnName());
         return QueryResult.ddl();
     }
 
     private QueryResult executeDropIndex(DropIndexStmt stmt, Catalog catalog) {
+        if (stmt.ifExists() && catalog.getIndex(stmt.indexName()).isEmpty()) {
+            return QueryResult.ddl();
+        }
         catalog.dropIndex(stmt.indexName());
         log.info("Index '{}' dropped", stmt.indexName());
         return QueryResult.ddl();
@@ -180,28 +247,67 @@ public final class StatementExecutor {
 
         Table  table  = catalog.getTable(stmt.tableName());
         Schema schema = table.getSchema();
+        List<ColumnDef> cols = schema.columns();
 
-        List<LiteralExpr> values = stmt.values();
-        List<ColumnDef>   cols   = schema.columns();
-
-        if (values.size() != cols.size()) {
-            throw new SchemaException(
-                    "INSERT into '%s' expected %d value(s) but got %d"
-                            .formatted(stmt.tableName(), cols.size(), values.size()));
+        // target position of each value: all columns in order, or the named columns
+        int[] target;
+        if (stmt.columns() == null) {
+            target = new int[cols.size()];
+            for (int i = 0; i < target.length; i++) target[i] = i;
+        } else {
+            target = new int[stmt.columns().size()];
+            Set<Integer> seen = new HashSet<>();
+            for (int i = 0; i < target.length; i++) {
+                String name = stmt.columns().get(i);
+                int pos = -1;
+                for (int c = 0; c < cols.size(); c++) {
+                    if (cols.get(c).name().equalsIgnoreCase(name)) { pos = c; break; }
+                }
+                if (pos < 0) {
+                    throw new SchemaException("Column '%s' does not exist in table '%s'".formatted(name, stmt.tableName()));
+                }
+                if (!seen.add(pos)) {
+                    throw new SchemaException("Column '%s' is listed more than once".formatted(name));
+                }
+                target[i] = pos;
+            }
         }
 
-        Map<String, Object> rowValues = new LinkedHashMap<>();
-        for (int i = 0; i < cols.size(); i++) {
-            ColumnDef col  = cols.get(i);
-            Object    raw  = values.get(i).value();
-            Object    typed = coerce(raw, col.dataType(), col.name());
-            rowValues.put(col.name(), typed);
+        // Validate and convert every row before inserting any, so a bad row inserts nothing
+        List<Row> newRows = new ArrayList<>();
+        for (List<LiteralExpr> values : stmt.rows()) {
+            if (values.size() != target.length) {
+                throw new SchemaException(
+                        "INSERT into '%s' expected %d value(s) but got %d"
+                                .formatted(stmt.tableName(), target.length, values.size()));
+            }
+            Object[] typed = new Object[cols.size()];          // unlisted columns are NULL
+            for (int i = 0; i < values.size(); i++) {
+                ColumnDef col = cols.get(target[i]);
+                typed[target[i]] = coerce(values.get(i).value(), col.dataType(), col.name());
+            }
+            for (int c = 0; c < cols.size(); c++) {
+                if (typed[c] == null && cols.get(c).notNull()) {
+                    throw new SchemaException("NULL value in column '%s' of table '%s' violates NOT NULL constraint"
+                            .formatted(cols.get(c).name(), stmt.tableName()));
+                }
+            }
+            Map<String, Object> rowValues = new LinkedHashMap<>();
+            for (int c = 0; c < cols.size(); c++) rowValues.put(cols.get(c).name(), typed[c]);
+            newRows.add(new Row(rowValues));
         }
 
-        Row newRow = new Row(rowValues);
+        for (Row newRow : newRows) {
+            insertOne(stmt.tableName(), table, newRow, catalog, txn, txnManager);
+        }
+        log.debug("Inserted {} row(s) into '{}'", newRows.size(), stmt.tableName());
+        return QueryResult.dml(newRows.size());
+    }
+
+    private void insertOne(String tableName, Table table, Row newRow, Catalog catalog, Transaction txn, TransactionManager txnManager) {
         if (table instanceof DiskTable diskTable) {
             TableFile tf = diskTable.getTableFile();
-            List<dev.koradb.index.Index> indexes = catalog.getIndexesForTable(stmt.tableName());
+            List<dev.koradb.index.Index> indexes = catalog.getIndexesForTable(tableName);
             // Unique check BEFORE touching the heap, so a violation leaves nothing behind.
             // Locking the unique indexes makes check+insert atomic against concurrent writers.
             withUniqueIndexLocks(indexes, () -> {
@@ -212,7 +318,7 @@ public final class StatementExecutor {
                 }
                 RecordId rid = tf.insertRow(newRow, txn);
                 if (txn != null) {
-                    txn.addUndoAction(new InsertUndoAction(stmt.tableName(), newRow, rid));
+                    txn.addUndoAction(new InsertUndoAction(tableName, newRow, rid));
                 }
                 for (dev.koradb.index.Index idx : indexes) {
                     Object val = newRow.get(idx.getColumnName());
@@ -224,14 +330,11 @@ public final class StatementExecutor {
         } else {
             if (txn != null) {
                 table.insertRow(newRow, txn);
-                txn.addUndoAction(new InsertUndoAction(stmt.tableName(), newRow));
+                txn.addUndoAction(new InsertUndoAction(tableName, newRow));
             } else {
                 table.insertRow(newRow);
             }
         }
-
-        log.debug("Inserted 1 row into '{}'", stmt.tableName());
-        return QueryResult.dml(1);
     }
 
     // =========================================================================
@@ -242,9 +345,11 @@ public final class StatementExecutor {
         if (txn != null) {
             if (txn.getIsolationLevel() == IsolationLevel.SERIALIZABLE) {
                 if (lockManager != null) {
-                    lockManager.acquireShared(txn.getId(), LockResource.table(stmt.tableName()));
-                    if (stmt.join().isPresent()) {
-                        lockManager.acquireShared(txn.getId(), LockResource.table(stmt.join().get().tableName()));
+                    if (stmt.tableName() != null) {
+                        lockManager.acquireShared(txn.getId(), LockResource.table(stmt.tableName()));
+                    }
+                    for (JoinClause j : stmt.joins()) {
+                        lockManager.acquireShared(txn.getId(), LockResource.table(j.tableName()));
                     }
                 }
             }
@@ -262,13 +367,11 @@ public final class StatementExecutor {
         }
 
         try {
-            Table  table  = catalog.getTable(stmt.tableName());
-            Schema schema = table.getSchema();
-
             // Validate projected columns exist if simple projection without JOIN
-            if (stmt.join().isEmpty() && !stmt.isSelectStar()) {
+            if (stmt.tableName() != null && stmt.joins().isEmpty() && !stmt.isSelectStar()) {
+                Schema schema = catalog.getTable(stmt.tableName()).getSchema();
                 for (SelectItem item : stmt.selectItems()) {
-                    if (!item.isAggregate()) {
+                    if (!item.isAggregate() && !item.isComputed()) {
                         String col = item.expression();
                         if (!schema.hasColumn(col) && (!col.contains(".") || !schema.hasColumn(col.substring(col.indexOf('.') + 1)))) {
                             throw new SchemaException(
@@ -292,7 +395,7 @@ public final class StatementExecutor {
             }
 
             List<String> outputCols = plan.getSchema().columns().stream().map(ColumnDef::name).toList();
-            log.debug("SELECT returned {} row(s) from '{}' (plan cost: {})", rows.size(), stmt.tableName(), compiled.cost().format());
+            log.debug("SELECT returned {} row(s) from '{}' (plan cost: {})", rows.size(), stmt.tableName() == null ? "(no table)" : stmt.tableName(), compiled.cost().format());
             return QueryResult.select(rows, outputCols);
         } finally {
             MvccContext.clear();
@@ -346,12 +449,7 @@ public final class StatementExecutor {
                 TableFile tf = diskTable.getTableFile();
                 for (TableFile.RidRow rr : tf.scanWithRids()) {
                     if (matchesWhere(rr.row(), stmt.where(), evaluator)) {
-                        Map<String, Object> newVals = new LinkedHashMap<>(rr.row().values());
-                        for (UpdateStmt.Assignment a : stmt.assignments()) {
-                            ColumnDef col   = schema.findColumn(a.columnName());
-                            Object    typed = coerce(a.value().value(), col.dataType(), col.name());
-                            newVals.put(a.columnName(), typed);
-                        }
+                        Map<String, Object> newVals = assign(rr.row(), stmt, schema, evaluator);
                         Row newRow = new Row(newVals);
                         List<dev.koradb.index.Index> indexes = catalog.getIndexesForTable(stmt.tableName());
                         withUniqueIndexLocks(indexes, () -> {
@@ -384,12 +482,7 @@ public final class StatementExecutor {
                     List<Row> visible = table.getRows();
                     for (Row row : visible) {
                         if (matchesWhere(row, stmt.where(), evaluator)) {
-                            Map<String, Object> newVals = new LinkedHashMap<>(row.values());
-                            for (UpdateStmt.Assignment a : stmt.assignments()) {
-                                ColumnDef col   = schema.findColumn(a.columnName());
-                                Object    typed = coerce(a.value().value(), col.dataType(), col.name());
-                                newVals.put(a.columnName(), typed);
-                            }
+                            Map<String, Object> newVals = assign(row, stmt, schema, evaluator);
                             Row newRow = new Row(newVals);
                             table.updateRow(row, newRow, txn);
                             txn.addUndoAction(new UpdateUndoAction(stmt.tableName(), row, newRow));
@@ -400,10 +493,9 @@ public final class StatementExecutor {
                     // In-memory path: mutate rows in-place
                     for (Row row : table.mutableRows()) {
                         if (matchesWhere(row, stmt.where(), evaluator)) {
+                            Map<String, Object> newVals = assign(row, stmt, schema, evaluator);
                             for (UpdateStmt.Assignment a : stmt.assignments()) {
-                                ColumnDef col   = schema.findColumn(a.columnName());
-                                Object    typed = coerce(a.value().value(), col.dataType(), col.name());
-                                row.set(a.columnName(), typed);
+                                row.set(a.columnName(), newVals.get(a.columnName()));
                             }
                             count++;
                         }
@@ -505,6 +597,24 @@ public final class StatementExecutor {
      * Returns true if the row satisfies all predicates in the WHERE clause.
      * If where is absent, all rows match (no filtering).
      */
+    /**
+     * New values of a row for UPDATE ... SET: every assignment is evaluated against the old row
+     * ({@code SET a = b, b = a} swaps), then converted to the column type.
+     */
+    private Map<String, Object> assign(Row oldRow, UpdateStmt stmt, Schema schema, ExpressionEvaluator ev) {
+        Map<String, Object> newVals = new LinkedHashMap<>(oldRow.values());
+        for (UpdateStmt.Assignment a : stmt.assignments()) {
+            ColumnDef col = schema.findColumn(a.columnName());
+            Object value = coerce(ev.eval(a.value(), oldRow), col.dataType(), col.name());
+            if (value == null && col.notNull()) {
+                throw new SchemaException("NULL value in column '%s' of table '%s' violates NOT NULL constraint"
+                        .formatted(col.name(), stmt.tableName()));
+            }
+            newVals.put(col.name(), value);
+        }
+        return newVals;
+    }
+
     private boolean matchesWhere(Row row, Optional<WhereClause> where, ExpressionEvaluator ev) {
         if (where.isEmpty()) return true;
         return where.get().predicates().stream().allMatch(pred -> ev.evaluate(pred, row));

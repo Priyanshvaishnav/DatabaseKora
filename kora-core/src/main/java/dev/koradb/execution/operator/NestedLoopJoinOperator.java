@@ -2,101 +2,86 @@ package dev.koradb.execution.operator;
 
 import dev.koradb.catalog.Row;
 import dev.koradb.catalog.Schema;
-import dev.koradb.sql.ast.ColumnDef;
 import dev.koradb.execution.ExpressionEvaluator;
-import dev.koradb.sql.ast.BinaryExpr;
+import dev.koradb.sql.ast.Expression;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
- * Nested loop join operator.
- *
- * <p>For each tuple from the outer (left) operator, scans all tuples from the
- * inner (right) operator, evaluating the join predicate on each combined tuple.
+ * Nested-loop join with an arbitrary ON condition. The inner side is read once and kept in memory.
+ * With {@code leftOuter}, an outer row without any match is returned once with NULLs for the inner side.
  */
 public class NestedLoopJoinOperator implements Operator {
 
     private final Operator outer;
     private final Operator inner;
-    private final BinaryExpr condition;
+    private final Expression condition;
+    private final boolean leftOuter;
+    private final List<String> innerQualifiers;
     private final Schema schema;
     private final ExpressionEvaluator evaluator;
 
+    private List<Row> innerRows;
     private Row currentOuter;
+    private int innerPos;
+    private boolean matched;
 
-    public NestedLoopJoinOperator(Operator outer, Operator inner, BinaryExpr condition) {
+    public NestedLoopJoinOperator(Operator outer, Operator inner, Expression condition) {
+        this(outer, inner, condition, false, List.of());
+    }
+
+    public NestedLoopJoinOperator(Operator outer, Operator inner, Expression condition,
+                                  boolean leftOuter, List<String> innerQualifiers) {
         this.outer = outer;
         this.inner = inner;
         this.condition = condition;
-        this.schema = mergeSchemas(outer.getSchema(), inner.getSchema());
+        this.leftOuter = leftOuter;
+        this.innerQualifiers = List.copyOf(innerQualifiers);
+        this.schema = JoinSupport.mergeSchemas(outer.getSchema(), inner.getSchema());
         this.evaluator = new ExpressionEvaluator(this.schema);
-    }
-
-    private static Schema mergeSchemas(Schema s1, Schema s2) {
-        List<ColumnDef> cols = new ArrayList<>(s1.columns());
-        for (ColumnDef c2 : s2.columns()) {
-            if (!s1.hasColumn(c2.name())) {
-                cols.add(c2);
-            } else {
-                // If collision, also register qualified/unique name
-                cols.add(new ColumnDef(c2.name() + "_2", c2.dataType()));
-            }
-        }
-        return new Schema(cols);
     }
 
     @Override
     public void open() {
-        outer.open();
         inner.open();
+        innerRows = new ArrayList<>();
+        Row r;
+        while ((r = inner.next()) != null) innerRows.add(r);
+        inner.close();
+        outer.open();
         currentOuter = outer.next();
+        innerPos = 0;
+        matched = false;
     }
 
     @Override
     public Row next() {
         while (currentOuter != null) {
-            Row innerRow = inner.next();
-            if (innerRow == null) {
-                inner.close();
-                inner.open();
-                currentOuter = outer.next();
+            if (innerPos < innerRows.size()) {
+                Row joined = JoinSupport.mergeRows(currentOuter, innerRows.get(innerPos++));
+                if (condition == null || evaluator.evaluate(condition, joined)) {
+                    matched = true;
+                    return joined;
+                }
                 continue;
             }
-
-            Row joined = mergeRows(currentOuter, innerRow);
-            if (condition == null || evaluator.evaluate(condition, joined)) {
-                return joined;
-            }
+            Row unmatched = leftOuter && !matched
+                    ? JoinSupport.mergeRows(currentOuter, JoinSupport.nullRow(inner.getSchema(), innerQualifiers))
+                    : null;
+            currentOuter = outer.next();
+            innerPos = 0;
+            matched = false;
+            if (unmatched != null) return unmatched;
         }
         return null;
-    }
-
-    private Row mergeRows(Row r1, Row r2) {
-        Map<String, Object> map = new LinkedHashMap<>(r1.values());
-        for (Map.Entry<String, Object> entry : r2.values().entrySet()) {
-            if (!map.containsKey(entry.getKey())) {
-                map.put(entry.getKey(), entry.getValue());
-            } else {
-                map.put(entry.getKey() + "_2", entry.getValue());
-            }
-        }
-        // Also preserve qualified keys from r2
-        for (Map.Entry<String, Object> entry : r2.values().entrySet()) {
-            if (entry.getKey().contains(".")) {
-                map.put(entry.getKey(), entry.getValue());
-            }
-        }
-        return new Row(map);
     }
 
     @Override
     public void close() {
         currentOuter = null;
+        innerRows = null;
         outer.close();
-        inner.close();
     }
 
     @Override

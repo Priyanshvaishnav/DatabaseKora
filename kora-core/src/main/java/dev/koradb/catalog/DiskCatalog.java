@@ -192,6 +192,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
 
     @Override
     public synchronized void createDatabase(String name) {
+        requireSafeName("database", name);
         Path dbDir = dbDir(name);
         if (Files.exists(dbDir)) {
             throw new SchemaException("Database '%s' already exists".formatted(name));
@@ -366,6 +367,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     // =========================================================================
 
     synchronized void createTableIn(String dbName, Table table) {
+        requireSafeName("table", table.getName());
         OpenDb db = open(dbName);
         if (db.files.containsKey(table.getName().toLowerCase())) {
             throw new SchemaException(
@@ -383,12 +385,41 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
             for (int i = 0; i < cols.size(); i++) {
                 if (i > 0) sb.append(", ");
                 sb.append(cols.get(i).name()).append(" ").append(cols.get(i).dataType());
+                if (cols.get(i).notNull()) sb.append(" NOT NULL");
             }
             sb.append(")");
             long lsn = db.logManager.appendDdl(0L, 0L, sb.toString());
             db.logManager.flush(lsn);
         }
         log.info("Created table '{}' in database '{}'", table.getName(), db.name);
+    }
+
+    /** ALTER TABLE ADD COLUMN: switches the table file to the new schema and rewrites its catalog line. */
+    synchronized void addColumnIn(String dbName, String tableName, ColumnDef column) {
+        OpenDb db = open(dbName);
+        TableFile tf = db.files.get(tableName.toLowerCase());
+        if (tf == null) {
+            throw new SchemaException("Table '%s' does not exist in database '%s'".formatted(tableName, db.name));
+        }
+        if (tf.getSchema().hasColumn(column.name())) {
+            throw new SchemaException("Column '%s' already exists in table '%s'".formatted(column.name(), tableName));
+        }
+        if (tf.getSchema().columns().size() >= 32767) {
+            throw new SchemaException("Too many columns");
+        }
+        if (column.notNull() && !tf.scanAll().isEmpty()) {
+            throw new SchemaException("Cannot add NOT NULL column '%s' to non-empty table '%s' (existing rows would be NULL)"
+                    .formatted(column.name(), tableName));
+        }
+        tf.alterSchema(tf.getSchema().withColumn(column));
+        rewriteTableMeta(db, new Table(tableName, tf.getSchema()));
+        if (db.logManager != null && !suppressWalLogging) {
+            long lsn = db.logManager.appendDdl(0L, 0L, "ALTER TABLE " + tableName + " ADD COLUMN " + column.name() + " "
+                    + column.dataType() + (column.notNull() ? " NOT NULL" : ""));
+            db.logManager.flush(lsn);
+        }
+        statsCache.remove(tf);
+        log.info("Added column '{}' to table '{}' in database '{}'", column.name(), tableName, db.name);
     }
 
     synchronized void dropTableIn(String dbName, String tableName) {
@@ -444,6 +475,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     // =========================================================================
 
     synchronized void createIndexIn(String dbName, String indexName, String tableName, String columnName, boolean unique) {
+        requireSafeName("index", indexName);
         OpenDb db = open(dbName);
         String tableKey = tableName.toLowerCase();
         if (!db.files.containsKey(tableKey)) {
@@ -607,6 +639,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     @Override public void createTable(Table table)        { createTableIn(currentDbName, table); }
     @Override public void dropTable(String tableName)      { dropTableIn(currentDbName, tableName); }
     @Override public Table getTable(String tableName)      { return getTableIn(currentDbName, tableName); }
+    @Override public void addColumn(String tableName, ColumnDef column) { addColumnIn(currentDbName, tableName, column); }
     @Override public List<Table> listTables()              { return listTablesIn(currentDbName); }
 
     @Override
@@ -766,12 +799,33 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
     }
 
     private void appendIndexToMeta(Path dbDir, String indexName, String tableName, String columnName, boolean unique) {
-        String line = "INDEX " + indexName + " " + tableName + " " + columnName + " " + unique + "\n";
+        String line = "INDEX " + enc(indexName) + " " + enc(tableName) + " " + enc(columnName) + " " + unique + "\n";
         try {
             Files.writeString(metaFile(dbDir), line, StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (IOException e) {
             throw new StorageException("Cannot write index to catalog.meta in " + dbDir, e);
+        }
+    }
+
+    /** Replaces the TABLE line of {@code table} in catalog.meta (written to a temp file, then moved). */
+    private void rewriteTableMeta(OpenDb db, Table table) {
+        Path metaPath = metaFile(db.dir);
+        try {
+            List<String> lines = new ArrayList<>();
+            for (String l : Files.readAllLines(metaPath, StandardCharsets.UTF_8)) {
+                String[] parts = l.trim().split("\\s+");
+                if (parts.length >= 2 && parts[0].equalsIgnoreCase("TABLE") && dec(parts[1]).equalsIgnoreCase(table.getName())) {
+                    lines.add(tableToMetaLine(table));
+                } else if (!l.isBlank()) {
+                    lines.add(l.trim());
+                }
+            }
+            Path tmp = metaPath.resolveSibling(metaPath.getFileName() + ".tmp");
+            Files.writeString(tmp, String.join("\n", lines) + "\n", StandardCharsets.UTF_8);
+            Files.move(tmp, metaPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException e) {
+            throw new StorageException("Cannot rewrite catalog.meta in " + db.dir, e);
         }
     }
 
@@ -787,9 +841,9 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
                         String[] parts = l.split("\\s+");
                         if (parts.length < 2) return false;
                         if (parts[0].equalsIgnoreCase("TABLE")) {
-                            return db.files.containsKey(parts[1].toLowerCase());
+                            return db.files.containsKey(dec(parts[1]).toLowerCase());
                         } else if (parts[0].equalsIgnoreCase("INDEX")) {
-                            return db.indexes.containsKey(parts[1].toLowerCase());
+                            return db.indexes.containsKey(dec(parts[1]).toLowerCase());
                         }
                         return false;
                     })
@@ -826,7 +880,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
                     .filter(l -> !l.isBlank() && l.toUpperCase().startsWith("INDEX "))
                     .map(l -> {
                         String[] parts = l.split("\\s+");
-                        return new IndexMeta(parts[1], parts[2], parts[3], Boolean.parseBoolean(parts[4]));
+                        return new IndexMeta(dec(parts[1]), dec(parts[2]), dec(parts[3]), Boolean.parseBoolean(parts[4]));
                     })
                     .toList();
         } catch (IOException e) {
@@ -839,26 +893,83 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         if (tokens.length < 2 || !tokens[0].equalsIgnoreCase("TABLE")) {
             throw new StorageException("Invalid catalog.meta line: " + line);
         }
-        String tableName = tokens[1];
+        String tableName = dec(tokens[1]);
         List<ColumnDef> cols = new ArrayList<>();
+        int stored = 0;
         for (int i = 2; i < tokens.length; i++) {
+            if (tokens[i].startsWith("@stored=")) {
+                stored = Integer.parseInt(tokens[i].substring("@stored=".length()));
+                continue;
+            }
             String[] parts = tokens[i].split(":");
-            if (parts.length != 2) {
+            if (parts.length != 2 && !(parts.length == 3 && parts[2].equals("NN"))) {
                 throw new StorageException("Invalid column spec '%s' in: %s".formatted(tokens[i], line));
             }
-            cols.add(new ColumnDef(parts[0], DataType.valueOf(parts[1].toUpperCase())));
+            cols.add(new ColumnDef(dec(parts[0]), DataType.valueOf(parts[1].toUpperCase()), parts.length == 3));
         }
-        return new Table(tableName, new Schema(cols));
+        return new Table(tableName, new Schema(cols, stored));
     }
 
     private String tableToMetaLine(Table table) {
         String cols = table.getSchema().columns().stream()
-                .map(c -> c.name() + ":" + c.dataType().name())
+                .map(c -> enc(c.name()) + ":" + c.dataType().name() + (c.notNull() ? ":NN" : ""))
                 .collect(Collectors.joining(" "));
-        return "TABLE " + table.getName() + " " + cols;
+        // "@stored=N": records written before ALTER TABLE ADD COLUMN have N columns
+        String stored = table.getSchema().altered() ? " @stored=" + table.getSchema().storedColumnCount() : "";
+        return "TABLE " + enc(table.getName()) + " " + cols + stored;
+    }
+
+    /**
+     * Names in catalog.meta are space-separated, so characters that would break a line (space, ':',
+     * '%', '@', control characters) are written as %XX. Plain identifiers are unchanged.
+     */
+    /**
+     * Database, table and index names become file names, so they may only contain letters, digits,
+     * '_', '-' and spaces (quoted identifiers can otherwise contain anything, such as "../x" or "t.toast").
+     */
+    static void requireSafeName(String kind, String name) {
+        boolean ok = name != null && !name.isBlank() && !name.startsWith(" ") && !name.endsWith(" ") && name.length() <= 128;
+        if (ok) {
+            for (int i = 0; i < name.length(); i++) {
+                char c = name.charAt(i);
+                if (!(Character.isLetterOrDigit(c) || c == '_' || c == '-' || c == ' ')) { ok = false; break; }
+            }
+        }
+        if (!ok) {
+            throw new SchemaException("Invalid %s name '%s': use letters, digits, '_', '-' or spaces".formatted(kind, name));
+        }
+    }
+
+    static String enc(String name) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : name.getBytes(StandardCharsets.UTF_8)) {
+            int c = b & 0xff;
+            if (c <= 0x20 || c == ':' || c == '%' || c == '@' || c >= 0x7f) {
+                sb.append('%').append(String.format("%02X", c));
+            } else {
+                sb.append((char) c);
+            }
+        }
+        return sb.toString();
+    }
+
+    static String dec(String token) {
+        if (token.indexOf('%') < 0) return token;
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            if (c == '%' && i + 2 < token.length()) {
+                out.write(Integer.parseInt(token.substring(i + 1, i + 3), 16));
+                i += 2;
+            } else {
+                out.write((byte) c);
+            }
+        }
+        return out.toString(StandardCharsets.UTF_8);
     }
 
     private Path dbDir(String dbName) {
+        requireSafeName("database", dbName);       // never resolve "../x" outside the data directory
         return dataDir.resolve(dbName.toLowerCase());
     }
 

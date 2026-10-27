@@ -67,8 +67,9 @@ public final class Row {
     /** Returns the value for the given column name, or {@code null} if absent. */
     public Object get(String columnName) {
         if (columnName == null) return null;
-        Object val = values.get(columnName);
-        if (val != null) return val;
+        // An exact key that is present wins, even when its value is NULL: a NULL "orders.id" from a
+        // LEFT JOIN must not fall back to another table's "id".
+        if (values.containsKey(columnName)) return values.get(columnName);
 
         // Case-insensitive direct match
         for (Map.Entry<String, Object> entry : values.entrySet()) {
@@ -88,6 +89,15 @@ public final class Row {
         }
 
         return null;
+    }
+
+    /** True when the row has a value (possibly NULL) under exactly this name, ignoring case. */
+    public boolean hasKey(String columnName) {
+        if (values.containsKey(columnName)) return true;
+        for (String k : values.keySet()) {
+            if (k.equalsIgnoreCase(columnName)) return true;
+        }
+        return false;
     }
 
     /** Sets (or overwrites) a value for the given column name. */

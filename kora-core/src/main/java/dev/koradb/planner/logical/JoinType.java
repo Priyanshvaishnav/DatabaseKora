@@ -5,5 +5,7 @@ package dev.koradb.planner.logical;
  */
 public enum JoinType {
     INNER,
+    /** LEFT OUTER JOIN: unmatched left rows are kept with NULLs for the right side. */
+    LEFT,
     CROSS
 }

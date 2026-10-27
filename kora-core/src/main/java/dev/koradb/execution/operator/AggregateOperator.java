@@ -19,25 +19,33 @@ public class AggregateOperator implements Operator {
 
     private final Operator child;
     private final List<SelectItem> selectItems;
-    private final String groupByColumn;
+    private final List<String> groupByColumns;
     private final Schema schema;
 
     private List<Row> aggregatedRows;
     private int cursor = 0;
 
     public AggregateOperator(Operator child, List<SelectItem> selectItems, String groupByColumn) {
+        this(child, selectItems, groupByColumn == null ? List.of() : List.of(groupByColumn));
+    }
+
+    /**
+     * @param groupByColumns GROUP BY columns; empty for a scalar aggregate (one output row)
+     */
+    public AggregateOperator(Operator child, List<SelectItem> selectItems, List<String> groupByColumns) {
         this.child = child;
         this.selectItems = List.copyOf(selectItems);
-        this.groupByColumn = groupByColumn;
+        this.groupByColumns = List.copyOf(groupByColumns);
         this.schema = computeSchema();
     }
 
+    /** Output columns: the select items in order (group columns first for the legacy SELECT-less case). */
     private Schema computeSchema() {
         List<ColumnDef> cols = new ArrayList<>();
-        if (groupByColumn != null) {
-            ColumnDef groupCol = child.getSchema().findColumn(groupByColumn);
-            DataType type = groupCol != null ? groupCol.dataType() : DataType.VARCHAR;
-            cols.add(new ColumnDef(groupByColumn, type));
+        Schema in = child.getSchema();
+        if (selectItems.isEmpty()) {
+            for (String g : groupByColumns) cols.add(new ColumnDef(g, typeOf(in, g)));
+            return new Schema(cols);
         }
         for (SelectItem item : selectItems) {
             if (item.isAggregate()) {
@@ -46,70 +54,91 @@ public class AggregateOperator implements Operator {
                     case AVG -> DataType.DOUBLE;
                     case SUM -> {
                         // SUM over an integer column stays an integer (m4); over DOUBLE it is DOUBLE
-                        ColumnDef c = child.getSchema().findColumn(item.aggregateColumn());
-                        yield c != null && (c.dataType() == DataType.INT || c.dataType() == DataType.BIGINT)
-                                ? DataType.BIGINT : DataType.DOUBLE;
+                        DataType t = typeOf(in, item.aggregateColumn());
+                        yield t == DataType.INT || t == DataType.BIGINT ? DataType.BIGINT : DataType.DOUBLE;
                     }
-                    case MIN, MAX -> {
-                        ColumnDef c = child.getSchema().findColumn(item.aggregateColumn());
-                        yield c != null ? c.dataType() : DataType.VARCHAR;
-                    }
+                    case MIN, MAX -> typeOf(in, item.aggregateColumn());
                 };
                 cols.add(new ColumnDef(item.alias(), type));
-            } else if (groupByColumn != null && item.expression().equalsIgnoreCase(groupByColumn)) {
-                // Already added
             } else {
-                ColumnDef c = child.getSchema().findColumn(item.expression());
-                DataType type = c != null ? c.dataType() : DataType.VARCHAR;
-                cols.add(new ColumnDef(item.alias(), type));
+                cols.add(new ColumnDef(item.alias(), typeOf(in, item.expression())));
             }
         }
         return new Schema(cols);
+    }
+
+    private static DataType typeOf(Schema s, String col) {
+        ColumnDef c = s.findColumn(col);
+        if (c == null && col.contains(".")) c = s.findColumn(col.substring(col.indexOf('.') + 1));
+        return c != null ? c.dataType() : DataType.VARCHAR;
     }
 
     @Override
     public void open() {
         child.open();
         aggregatedRows = new ArrayList<>();
-
-        if (groupByColumn != null) {
-            // Grouped aggregation
-            Map<Object, List<Row>> groups = new LinkedHashMap<>();
+        if (!groupByColumns.isEmpty()) {
+            // Grouped aggregation; NULL keys form one group
+            Map<List<Object>, List<Row>> groups = new LinkedHashMap<>();
+            Map<List<Object>, List<Object>> groupValues = new HashMap<>();
             Row r;
             while ((r = child.next()) != null) {
-                Object key = getVal(r, groupByColumn);
+                List<Object> values = new ArrayList<>(groupByColumns.size());
+                List<Object> key = new ArrayList<>(groupByColumns.size());
+                for (String g : groupByColumns) {
+                    Object v = getVal(r, g);
+                    values.add(v);
+                    key.add(JoinSupport.hashKey(v));
+                }
                 groups.computeIfAbsent(key, k -> new ArrayList<>()).add(r);
+                groupValues.putIfAbsent(key, values);
             }
-
-            for (Map.Entry<Object, List<Row>> entry : groups.entrySet()) {
+            for (Map.Entry<List<Object>, List<Row>> entry : groups.entrySet()) {
+                List<Object> values = groupValues.get(entry.getKey());
                 Map<String, Object> map = new LinkedHashMap<>();
-                map.put(groupByColumn, entry.getKey());
+                for (int i = 0; i < groupByColumns.size(); i++) {
+                    map.put(groupByColumns.get(i), values.get(i));
+                }
                 calculateAggregates(entry.getValue(), map);
                 aggregatedRows.add(new Row(map));
             }
         } else {
-            // Scalar aggregation
+            // Scalar aggregation: always one row (COUNT(*) = 0 over no rows)
             List<Row> allRows = new ArrayList<>();
             Row r;
             while ((r = child.next()) != null) {
                 allRows.add(r);
             }
-
             Map<String, Object> map = new LinkedHashMap<>();
             calculateAggregates(allRows, map);
             aggregatedRows.add(new Row(map));
         }
-
         cursor = 0;
+    }
+
+    /** The GROUP BY column a plain select item refers to ("city", "customers.city"), or null. */
+    private String groupColumnFor(String expr) {
+        for (String g : groupByColumns) {
+            if (g.equalsIgnoreCase(expr)) return g;
+        }
+        String shortExpr = expr.contains(".") ? expr.substring(expr.indexOf('.') + 1) : expr;
+        for (String g : groupByColumns) {
+            String shortG = g.contains(".") ? g.substring(g.indexOf('.') + 1) : g;
+            if (shortG.equalsIgnoreCase(shortExpr) && (!expr.contains(".") || !g.contains("."))) return g;
+        }
+        return null;
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
     private void calculateAggregates(List<Row> rows, Map<String, Object> output) {
         for (SelectItem item : selectItems) {
             if (!item.isAggregate()) {
-                if (groupByColumn != null && item.expression().equalsIgnoreCase(groupByColumn)) {
-                    output.put(item.alias(), output.get(groupByColumn));
+                String g = groupColumnFor(item.expression());
+                if (g == null) {
+                    throw new dev.koradb.exception.ExecutionException("Column '" + item.expression()
+                            + "' must appear in GROUP BY or be used in an aggregate function");
                 }
+                output.put(item.alias(), output.get(g));
                 continue;
             }
 
@@ -194,20 +223,7 @@ public class AggregateOperator implements Operator {
 
     private Object getVal(Row row, String colName) {
         if ("*".equals(colName)) return null;
-        Object val = row.get(colName);
-        if (val != null) return val;
-        if (colName.contains(".")) {
-            String shortName = colName.substring(colName.indexOf('.') + 1);
-            val = row.get(shortName);
-            if (val != null) return val;
-        } else {
-            for (Map.Entry<String, Object> entry : row.values().entrySet()) {
-                if (entry.getKey().endsWith("." + colName)) {
-                    return entry.getValue();
-                }
-            }
-        }
-        return null;
+        return row.get(colName);
     }
 
     @Override

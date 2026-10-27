@@ -54,9 +54,16 @@ public final class RecordSerializer {
 
     public static final int HEADER_SIZE = 16; // 8 bytes xmin + 8 bytes xmax
 
+    /**
+     * Set in the xmin word of records that carry their column count (2 bytes after the header).
+     * Tables that were altered with ADD COLUMN write such records; older records are read with the
+     * table's original column count, and columns they do not have are NULL.
+     */
+    static final long COUNTED_FLAG = 1L << 62;
+
     public static long extractXmin(byte[] record) {
         if (record == null || record.length < HEADER_SIZE) return 0L;
-        return java.nio.ByteBuffer.wrap(record).getLong(0);
+        return java.nio.ByteBuffer.wrap(record).getLong(0) & ~COUNTED_FLAG;
     }
 
     public static long extractXmax(byte[] record) {
@@ -84,6 +91,7 @@ public final class RecordSerializer {
     public byte[] serialize(Row row) {
         List<ColumnDef> cols        = schema.columns();
         int             bitmapBytes = nullBitmapSize(cols.size());
+        boolean         counted     = schema.altered();
 
         // First pass: compute total byte size
         byte[] nullBitmap = new byte[bitmapBytes];
@@ -102,15 +110,19 @@ public final class RecordSerializer {
         }
 
         // Compute total length
-        int total = HEADER_SIZE + bitmapBytes;
+        int countBytes = counted ? 2 : 0;
+        int total = HEADER_SIZE + countBytes + bitmapBytes;
         for (byte[] b : encoded) total += b.length;
 
         // Second pass: write into a single array
         byte[] record = new byte[total];
-        java.nio.ByteBuffer.wrap(record).putLong(0, row.getXmin());
+        java.nio.ByteBuffer.wrap(record).putLong(0, counted ? row.getXmin() | COUNTED_FLAG : row.getXmin());
         java.nio.ByteBuffer.wrap(record).putLong(8, row.getXmax());
+        if (counted) {
+            java.nio.ByteBuffer.wrap(record).putShort(HEADER_SIZE, (short) cols.size());
+        }
 
-        int pos = HEADER_SIZE;
+        int pos = HEADER_SIZE + countBytes;
         System.arraycopy(nullBitmap, 0, record, pos, bitmapBytes);
         pos += bitmapBytes;
 
@@ -135,17 +147,29 @@ public final class RecordSerializer {
      */
     public Row deserialize(byte[] record) {
         List<ColumnDef> cols = schema.columns();
-        int bitmapBytes = nullBitmapSize(cols.size());
 
         long xmin = 0L;
         long xmax = 0L;
         int headerOffset = 0;
+        // columns physically present in this record
+        int present = schema.storedColumnCount();
 
-        if (record.length >= HEADER_SIZE + bitmapBytes) {
+        if (record.length >= HEADER_SIZE) {
             java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(record);
-            xmin = buf.getLong(0);
+            long rawXmin = buf.getLong(0);
             xmax = buf.getLong(8);
             headerOffset = HEADER_SIZE;
+            if ((rawXmin & COUNTED_FLAG) != 0) {
+                present = Short.toUnsignedInt(buf.getShort(HEADER_SIZE));
+                headerOffset += 2;
+            }
+            xmin = rawXmin & ~COUNTED_FLAG;
+        }
+        int bitmapBytes = nullBitmapSize(present);
+        if (record.length < headerOffset + bitmapBytes) {          // legacy header-less records
+            headerOffset = 0;
+            xmin = 0L;
+            xmax = 0L;
         }
 
         byte[] nullBitmap = new byte[bitmapBytes];
@@ -156,7 +180,7 @@ public final class RecordSerializer {
 
         for (int i = 0; i < cols.size(); i++) {
             ColumnDef col = cols.get(i);
-            if (getBit(nullBitmap, i)) {
+            if (i >= present || getBit(nullBitmap, i)) {      // added after this record was written
                 values.put(col.name(), null);
             } else {
                 Object[] result = decodeValue(record, pos, col.dataType(), col.name());

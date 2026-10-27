@@ -85,6 +85,14 @@ public interface Catalog {
     void dropTable(String tableName);
 
     /**
+     * Adds a column to a table of the current database (ALTER TABLE ADD COLUMN). Existing rows read
+     * NULL for it, so a NOT NULL column can only be added to an empty table.
+     */
+    default void addColumn(String tableName, dev.koradb.sql.ast.ColumnDef column) {
+        throw new UnsupportedOperationException("ALTER TABLE is not supported by " + getClass().getSimpleName());
+    }
+
+    /**
      * Returns the table with the given name from the current database.
      *
      * @throws dev.koradb.exception.SchemaException if not found or no DB selected

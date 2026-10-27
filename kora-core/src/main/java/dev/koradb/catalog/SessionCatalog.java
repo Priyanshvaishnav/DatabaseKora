@@ -59,6 +59,7 @@ public final class SessionCatalog implements Catalog {
     @Override public void createTable(Table table)       { shared.createTableIn(currentDb, table); }
     @Override public void dropTable(String tableName)     { shared.dropTableIn(currentDb, tableName); }
     @Override public Table getTable(String tableName)     { return shared.getTableIn(currentDb, tableName); }
+    @Override public void addColumn(String tableName, dev.koradb.sql.ast.ColumnDef column) { shared.addColumnIn(currentDb, tableName, column); }
     @Override public List<Table> listTables()             { return shared.listTablesIn(currentDb); }
 
     @Override

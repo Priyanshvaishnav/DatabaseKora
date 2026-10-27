@@ -1,7 +1,7 @@
 package dev.koradb.planner.logical;
 
 import dev.koradb.catalog.Schema;
-import dev.koradb.sql.ast.BinaryExpr;
+import dev.koradb.sql.ast.Expression;
 
 import java.util.Collections;
 import java.util.List;
@@ -20,14 +20,14 @@ public final class LogicalScan implements LogicalPlanNode {
     private final Schema schema;
     private final Optional<String> alias;
     private final List<String> projectedColumns;
-    private final List<BinaryExpr> pushedPredicates;
+    private final List<Expression> pushedPredicates;
 
     public LogicalScan(String tableName, Schema schema) {
         this(tableName, schema, Optional.empty(), List.of(), List.of());
     }
 
     public LogicalScan(String tableName, Schema schema, Optional<String> alias,
-                       List<String> projectedColumns, List<BinaryExpr> pushedPredicates) {
+                       List<String> projectedColumns, List<Expression> pushedPredicates) {
         this.tableName = Objects.requireNonNull(tableName);
         this.schema = Objects.requireNonNull(schema);
         this.alias = alias != null ? alias : Optional.empty();
@@ -47,7 +47,7 @@ public final class LogicalScan implements LogicalPlanNode {
         return projectedColumns;
     }
 
-    public List<BinaryExpr> pushedPredicates() {
+    public List<Expression> pushedPredicates() {
         return pushedPredicates;
     }
 
@@ -55,7 +55,7 @@ public final class LogicalScan implements LogicalPlanNode {
         return new LogicalScan(tableName, schema, alias, columns, pushedPredicates);
     }
 
-    public LogicalScan withPushedPredicates(List<BinaryExpr> predicates) {
+    public LogicalScan withPushedPredicates(List<Expression> predicates) {
         return new LogicalScan(tableName, schema, alias, projectedColumns, predicates);
     }
 
