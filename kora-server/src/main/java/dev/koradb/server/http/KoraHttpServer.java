@@ -8,10 +8,7 @@ import dev.koradb.catalog.Table;
 import dev.koradb.execution.QueryResult;
 import dev.koradb.mvcc.WriteConflictException;
 import dev.koradb.session.Session;
-import dev.koradb.sql.ast.*;
-import dev.koradb.sql.lexer.Lexer;
-import dev.koradb.sql.lexer.Token;
-import dev.koradb.sql.parser.Parser;
+import dev.koradb.sql.ReadOnlyCheck;
 import dev.koradb.transaction.lock.DeadlockException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,15 +65,16 @@ public final class KoraHttpServer implements AutoCloseable {
         server = HttpServer.create(new InetSocketAddress(config.host(), config.port()), 0);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 
-        // Register REST endpoints
-        server.createContext("/v1/query", this::handleQueryEndpoint);
-        server.createContext("/query", this::handleQueryEndpoint);
+        // Register REST endpoints. Everything but health needs credentials when a password is set
+        // (health stays open for load balancer and Kubernetes probes; it exposes no data).
+        server.createContext("/v1/query", authenticated(this::handleQueryEndpoint));
+        server.createContext("/query", authenticated(this::handleQueryEndpoint));
 
-        server.createContext("/v1/databases", this::handleDatabasesEndpoint);
-        server.createContext("/databases", this::handleDatabasesEndpoint);
+        server.createContext("/v1/databases", authenticated(this::handleDatabasesEndpoint));
+        server.createContext("/databases", authenticated(this::handleDatabasesEndpoint));
 
-        server.createContext("/v1/tables", this::handleTablesEndpoint);
-        server.createContext("/tables", this::handleTablesEndpoint);
+        server.createContext("/v1/tables", authenticated(this::handleTablesEndpoint));
+        server.createContext("/tables", authenticated(this::handleTablesEndpoint));
 
         server.createContext("/v1/health", this::handleHealthEndpoint);
         server.createContext("/health", this::handleHealthEndpoint);
@@ -121,6 +119,24 @@ public final class KoraHttpServer implements AutoCloseable {
     // =========================================================================
     // Request Handlers
     // =========================================================================
+
+    /** Rejects requests without valid {@code Authorization: Basic ...} / {@code Bearer ...} credentials. */
+    private com.sun.net.httpserver.HttpHandler authenticated(com.sun.net.httpserver.HttpHandler handler) {
+        return exchange -> {
+            boolean preflight = "OPTIONS".equalsIgnoreCase(exchange.getRequestMethod());
+            if (!preflight && !config.credentials().acceptsAuthorizationHeader(
+                    exchange.getRequestHeaders().getFirst("Authorization"))) {
+                exchange.getResponseHeaders().set("WWW-Authenticate", "Basic realm=\"KoraDB\", charset=\"UTF-8\"");
+                sendJson(exchange, 401, Map.of(
+                        "status", "error",
+                        "code", "UNAUTHORIZED",
+                        "error", "Authentication required: send 'Authorization: Basic base64(user:password)' or 'Authorization: Bearer <password>'"
+                ));
+                return;
+            }
+            handler.handle(exchange);
+        };
+    }
 
     private void handleQueryEndpoint(HttpExchange exchange) throws IOException {
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
@@ -211,7 +227,8 @@ public final class KoraHttpServer implements AutoCloseable {
                 // create=true, or a CREATE statement. A query against a misspelled name must fail
                 // instead of silently creating an empty database.
                 boolean ddlIntent = sql.trim().toUpperCase(java.util.Locale.ROOT).startsWith("CREATE ");
-                if (!createRequested && !ddlIntent) {
+                // Creating a database is a write: a read-only node never does it.
+                if (config.readOnly() || (!createRequested && !ddlIntent)) {
                     sendJson(exchange, 404, Map.of(
                             "status", "error",
                             "code", "DATABASE_NOT_FOUND",
@@ -235,19 +252,19 @@ public final class KoraHttpServer implements AutoCloseable {
         }
 
         if (config.readOnly()) {
+            boolean writes;
             try {
-                List<Token> tokens = new Lexer(sql).tokenize();
-                Statement stmt = new Parser(tokens).parse();
-                if (isMutatingStatement(stmt)) {
-                    sendJson(exchange, 403, Map.of(
-                            "status", "error",
-                            "code", "READ_ONLY",
-                            "error", "Cannot execute mutating statement on read-only replica: " + sql
-                    ));
-                    return;
-                }
-            } catch (Exception ignored) {
-                // Let database execution engine report syntax or parsing errors
+                writes = ReadOnlyCheck.firstWrite(sql).isPresent();
+            } catch (dev.koradb.exception.ParseException pe) {
+                writes = false;     // the engine rejects it with the same parse error
+            }
+            if (writes) {
+                sendJson(exchange, 403, Map.of(
+                        "status", "error",
+                        "code", "READ_ONLY",
+                        "error", "Cannot execute mutating statement on read-only replica: " + sql
+                ));
+                return;
             }
         }
 
@@ -415,18 +432,6 @@ public final class KoraHttpServer implements AutoCloseable {
     // =========================================================================
     // Helpers
     // =========================================================================
-
-    private boolean isMutatingStatement(Statement stmt) {
-        return stmt instanceof InsertStmt
-                || stmt instanceof UpdateStmt
-                || stmt instanceof DeleteStmt
-                || stmt instanceof CreateTableStmt
-                || stmt instanceof DropTableStmt
-                || stmt instanceof CreateIndexStmt
-                || stmt instanceof DropIndexStmt
-                || stmt instanceof CreateDatabaseStmt
-                || stmt instanceof DropDatabaseStmt;
-    }
 
     private void handleOptions(HttpExchange exchange) throws IOException {
         if (config.corsEnabled()) {

@@ -47,14 +47,17 @@ public class KoraConnection implements Connection {
         this.autoCommit = jdbcUrl.getBooleanProperty("autoCommit", true);
         this.currentCatalog = jdbcUrl.database();
 
+        // DriverManager.getConnection(url, user, password) and ?user=&password= both land here
+        String user = jdbcUrl.getProperty("user", "");
+        String password = jdbcUrl.getProperty("password", "");
         try {
             KoraClient clientInstance;
             try {
-                clientInstance = KoraClient.connect(jdbcUrl.host(), jdbcUrl.port(), jdbcUrl.database());
+                clientInstance = KoraClient.connect(jdbcUrl.host(), jdbcUrl.port(), jdbcUrl.database(), user, password);
             } catch (KoraClientException e) {
                 if (e.getMessage() != null && e.getMessage().contains("does not exist") && !jdbcUrl.database().isEmpty()) {
                     // Connect without database, create it, and use it
-                    clientInstance = KoraClient.connect(jdbcUrl.host(), jdbcUrl.port(), "");
+                    clientInstance = KoraClient.connect(jdbcUrl.host(), jdbcUrl.port(), "", user, password);
                     clientInstance.execute("CREATE DATABASE " + jdbcUrl.database() + ";");
                     clientInstance.execute("USE " + jdbcUrl.database() + ";");
                 } else {
@@ -68,7 +71,13 @@ public class KoraConnection implements Connection {
                 } catch (Exception ignored) {
                 }
             }
-        } catch (IOException | KoraClientException e) {
+        } catch (KoraClientException e) {
+            if (e.getErrorCode() == dev.koradb.protocol.ErrorMessage.ERR_AUTH) {
+                // SQLState 28000: invalid authorization specification
+                throw new SQLException(e.getMessage(), "28000", e);
+            }
+            throw new SQLException("Failed to connect to KoraDB server at " + jdbcUrl.host() + ":" + jdbcUrl.port(), e);
+        } catch (IOException e) {
             throw new SQLException("Failed to connect to KoraDB server at " + jdbcUrl.host() + ":" + jdbcUrl.port(), e);
         }
     }
@@ -84,7 +93,8 @@ public class KoraConnection implements Connection {
             String trimmed = sql.trim().toUpperCase();
             if (!autoCommit && !inTransaction && !trimmed.startsWith("BEGIN") && !trimmed.startsWith("COMMIT")
                     && !trimmed.startsWith("ROLLBACK") && !trimmed.startsWith("SET ")
-                    && !trimmed.startsWith("CREATE ") && !trimmed.startsWith("DROP ") && !trimmed.startsWith("USE ")) {
+                    && !trimmed.startsWith("CREATE ") && !trimmed.startsWith("DROP ") && !trimmed.startsWith("ALTER ")
+                    && !trimmed.startsWith("USE ")) {
                 // DDL is not transactional on the server, so it is run outside a transaction
                 client.execute("BEGIN;");
                 inTransaction = true;

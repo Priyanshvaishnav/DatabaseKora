@@ -68,6 +68,18 @@ public final class WalSender implements AutoCloseable {
             return;
         }
 
+        // The snapshot and WAL stream carry every row: a primary with a password only serves
+        // replicas that present it.
+        if (!config.authToken().isEmpty() && !java.security.MessageDigest.isEqual(
+                config.authToken().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                req.authToken().getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
+            log.warn("Rejected replica '{}' from {}: authentication failed", req.replicaId(), socket.getRemoteSocketAddress());
+            ReplicationCodec.writeMessage(
+                    new HandshakeResponse(config.primaryId(), 0L, 1, false, "Authentication failed"), out);
+            close();
+            return;
+        }
+
         ReplicationMode mode = req.mode() != null ? req.mode() : config.defaultMode();
         this.replicaInfo = new ReplicaInfo(req.replicaId(), socket.getRemoteSocketAddress(), mode, System.currentTimeMillis());
         this.replicaInfo.setLastAckFlushedLsn(req.lastFlushedLsn());

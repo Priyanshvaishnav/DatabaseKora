@@ -98,6 +98,7 @@ public final class ReplicationCodec {
                 dos.writeUTF(req.replicaId());
                 dos.writeLong(req.lastFlushedLsn());
                 dos.writeByte(req.mode().getCode());
+                dos.writeUTF(req.authToken());
             }
             case HandshakeResponse resp -> {
                 dos.writeUTF(resp.primaryId());
@@ -163,7 +164,8 @@ public final class ReplicationCodec {
                 String replicaId = dis.readUTF();
                 long lastFlushedLsn = dis.readLong();
                 ReplicationMode mode = ReplicationMode.fromCode(dis.readByte());
-                yield new HandshakeRequest(replicaId, lastFlushedLsn, mode);
+                String authToken = dis.available() > 0 ? dis.readUTF() : "";   // absent from older replicas
+                yield new HandshakeRequest(replicaId, lastFlushedLsn, mode, authToken);
             }
             case HANDSHAKE_RESP -> {
                 String primaryId = dis.readUTF();

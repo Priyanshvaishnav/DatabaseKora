@@ -79,6 +79,9 @@ public final class ServerMain {
 
         System.out.printf("  Storage:            %s%n",
                 config.dataDir() != null ? config.dataDir().toAbsolutePath() : "in-memory");
+        System.out.printf("  Authentication:     %s%n", config.credentials().required()
+                ? "password required (user '" + config.credentials().user() + "')"
+                : (config.bindsBeyondLoopback() ? "OFF - anyone on the network has full access (set KORA_PASSWORD)" : "off (local only)"));
         System.out.println("================================================================================");
         System.out.println("Press Ctrl+C to terminate cleanly");
     }
@@ -105,6 +108,11 @@ public final class ServerMain {
                   --no-http                     Disable HTTP REST query server
                   --metrics-port <PORT>         Prometheus metrics and health port (env: KORA_METRICS_PORT, default: 9100)
                   --no-metrics                  Disable HTTP Prometheus exporter and health endpoint
+                  --user <NAME>                 User name clients must present (env: KORA_USER, default: kora)
+                  --password <SECRET>           Require this password on the SQL port, HTTP API (except /v1/health)
+                                                and replication port (env: KORA_PASSWORD, default: none)
+                  --password-file <PATH>        Read the password from a file, e.g. a Docker/Kubernetes secret
+                                                (env: KORA_PASSWORD_FILE)
                   -v, --version                 Print version information and exit
                   --help                        Show this help message and exit
                 """);

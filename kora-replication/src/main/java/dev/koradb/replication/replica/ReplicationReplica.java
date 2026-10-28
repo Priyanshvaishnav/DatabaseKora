@@ -6,10 +6,7 @@ import dev.koradb.execution.QueryResult;
 import dev.koradb.replication.model.NodeRole;
 import dev.koradb.replication.model.ReadOnlyReplicaException;
 import dev.koradb.replication.model.ReplicationStatus;
-import dev.koradb.sql.ast.*;
-import dev.koradb.sql.lexer.Lexer;
-import dev.koradb.sql.lexer.Token;
-import dev.koradb.sql.parser.Parser;
+import dev.koradb.sql.ReadOnlyCheck;
 import dev.koradb.storage.TableFile;
 import dev.koradb.storage.wal.LogManager;
 import org.slf4j.Logger;
@@ -96,28 +93,12 @@ public final class ReplicationReplica implements AutoCloseable {
      * Executes a SQL statement. In REPLICA mode, mutating statements are rejected.
      */
     public QueryResult execute(String sql) {
-        List<Token> tokens = new Lexer(sql).tokenize();
-        Statement stmt = new Parser(tokens).parse();
-
-        if (role == NodeRole.REPLICA && isMutatingStatement(stmt)) {
+        // Every statement of a multi-statement string is checked: the engine runs all of them.
+        if (role == NodeRole.REPLICA && ReadOnlyCheck.firstWrite(sql).isPresent()) {
             throw new ReadOnlyReplicaException("Cannot execute mutating statement on read-only replica: " + sql);
         }
 
         return db.execute(sql);
-    }
-
-    private boolean isMutatingStatement(Statement stmt) {
-        return stmt instanceof InsertStmt
-                || stmt instanceof UpdateStmt
-                || stmt instanceof DeleteStmt
-                || stmt instanceof CreateTableStmt
-                || stmt instanceof DropTableStmt
-                || stmt instanceof CreateIndexStmt
-                || stmt instanceof DropIndexStmt
-                || stmt instanceof CreateDatabaseStmt
-                || stmt instanceof DropDatabaseStmt
-                || stmt instanceof TruncateStmt
-                || stmt instanceof AlterTableStmt;
     }
 
     private void unpackSnapshot(Map<String, byte[]> files) {

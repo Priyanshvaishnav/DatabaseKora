@@ -54,6 +54,14 @@ public final class KoraClient implements AutoCloseable {
      * Connects to a KoraDB server and specifies an initial target database.
      */
     public static KoraClient connect(String host, int port, String database) throws IOException {
+        return connect(host, port, database, "", "");
+    }
+
+    /**
+     * Connects with a user name and password, for servers started with a password
+     * ({@code --password} / {@code KORA_PASSWORD}).
+     */
+    public static KoraClient connect(String host, int port, String database, String user, String password) throws IOException {
         Socket socket = new Socket();
         socket.connect(new InetSocketAddress(host, port), DEFAULT_TIMEOUT_MS);
         socket.setSoTimeout(DEFAULT_TIMEOUT_MS);
@@ -63,7 +71,7 @@ public final class KoraClient implements AutoCloseable {
         BufferedOutputStream out = new BufferedOutputStream(socket.getOutputStream());
 
         // Perform handshake
-        ConnectMessage connectMsg = new ConnectMessage(ConnectMessage.CURRENT_PROTOCOL_VERSION, "KoraClient/0.1.0", database);
+        ConnectMessage connectMsg = new ConnectMessage(ConnectMessage.CURRENT_PROTOCOL_VERSION, "KoraClient/0.1.0", database, user, password);
         ProtocolCodec.writeMessage(out, connectMsg);
 
         Message resp = ProtocolCodec.readMessage(in);

@@ -46,6 +46,8 @@ public final class ProtocolCodec {
                 dos.writeInt(m.protocolVersion());
                 writeString(dos, m.clientName());
                 writeString(dos, m.database());
+                writeString(dos, m.user());
+                writeString(dos, m.password());
             }
             case ConnectOkMessage m -> {
                 writeString(dos, m.serverVersion());
@@ -147,7 +149,11 @@ public final class ProtocolCodec {
                 int version = pin.readInt();
                 String clientName = readString(pin);
                 String database = readString(pin);
-                yield new ConnectMessage(version, clientName, database);
+                // Credentials were added after protocol version 1 shipped: clients that predate
+                // them end the payload after the database name.
+                String user = pin.available() > 0 ? readString(pin) : "";
+                String password = pin.available() > 0 ? readString(pin) : "";
+                yield new ConnectMessage(version, clientName, database, user, password);
             }
             case CONNECT_OK -> {
                 String serverVersion = readString(pin);
