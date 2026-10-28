@@ -56,6 +56,15 @@ public final class ServerInstance implements AutoCloseable {
         log.info("Bootstrapping KoraDB node (role={}, host={}, port={}, dataDir={})",
                 config.role(), config.host(), config.port(),
                 config.dataDir() != null ? config.dataDir() : ":memory:");
+        Credentials credentials = config.credentials();
+        if (credentials.required()) {
+            log.info("Authentication enabled for user '{}' (SQL, HTTP API and replication)", credentials.user());
+        } else if (config.bindsBeyondLoopback()) {
+            log.warn("SECURITY: no password is set and the node listens on {}. Anyone who can reach ports {} (SQL), "
+                    + "{} (HTTP) and {} (replication) can read and change all data. Set KORA_PASSWORD / --password "
+                    + "(or KORA_PASSWORD_FILE / --password-file).",
+                    config.host(), config.port(), config.httpPort(), config.replicationPort());
+        }
 
         // 1. Initialize DB engine
         if (config.dataDir() != null) {
@@ -110,7 +119,8 @@ public final class ServerInstance implements AutoCloseable {
                         config.replicationMode(),
                         1000L,
                         5000L,
-                        100
+                        100,
+                        credentials.password()
                 );
                 this.master = new ReplicationMaster(masterConfig, dc.getLogManager(), snapshotSupplier);
                 this.master.attachTo(db);
@@ -119,7 +129,7 @@ public final class ServerInstance implements AutoCloseable {
                         config.host(), config.replicationPort(), config.replicationMode(), replDb);
             }
 
-            KoraServerConfig serverConfig = new KoraServerConfig(config.host(), config.port(), 128, config.dataDir(), false);
+            KoraServerConfig serverConfig = new KoraServerConfig(config.host(), config.port(), 128, config.dataDir(), false, credentials);
             this.server = new KoraServer(serverConfig, db);
             this.server.start();
 
@@ -138,19 +148,19 @@ public final class ServerInstance implements AutoCloseable {
                     config.primaryHost(),
                     config.primaryPort(),
                     config.replicationMode()
-            );
+            ).withAuthToken(credentials.password());   // a cluster shares one password
             this.replica = new ReplicationReplica(db, replicaConfig);
             this.replica.start();
             log.info("Replication replica '{}' tracking primary at {}:{}",
                     config.replicaId(), config.primaryHost(), config.primaryPort());
 
-            KoraServerConfig serverConfig = new KoraServerConfig(config.host(), config.port(), 128, config.dataDir(), true);
+            KoraServerConfig serverConfig = new KoraServerConfig(config.host(), config.port(), 128, config.dataDir(), true, credentials);
             this.server = new KoraServer(serverConfig, db);
             this.server.start();
 
         } else {
             // STANDALONE
-            KoraServerConfig serverConfig = new KoraServerConfig(config.host(), config.port(), 128, config.dataDir(), false);
+            KoraServerConfig serverConfig = new KoraServerConfig(config.host(), config.port(), 128, config.dataDir(), false, credentials);
             this.server = new KoraServer(serverConfig, db);
             this.server.start();
         }
@@ -162,7 +172,7 @@ public final class ServerInstance implements AutoCloseable {
                         config.host(),
                         config.httpPort(),
                         config.role() == NodeRole.REPLICA
-                );
+                ).withCredentials(credentials);
                 this.httpServer = new KoraHttpServer(httpConfig, db);
                 this.httpServer.start();
                 log.info("HTTP REST query server running at http://{}:{}/v1/query",

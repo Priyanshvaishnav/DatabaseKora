@@ -17,6 +17,7 @@ public record ErrorMessage(
     public static final int ERR_EXECUTION = 1003;
     public static final int ERR_CONFLICT = 1004;
     public static final int ERR_PROTOCOL = 1005;
+    public static final int ERR_AUTH = 1006;
 
     public ErrorMessage {
         if (message == null) message = "Unknown error";

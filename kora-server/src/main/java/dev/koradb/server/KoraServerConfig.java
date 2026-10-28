@@ -10,13 +10,15 @@ import java.nio.file.Path;
  * @param backlog       connection backlog queue size
  * @param dataDirectory optional path to persistent data directory; null for in-memory mode
  * @param readOnly      whether this server instance rejects mutating statements (read replica mode)
+ * @param credentials   user name and password clients must present ({@link Credentials#NONE}: no authentication)
  */
 public record KoraServerConfig(
         String host,
         int port,
         int backlog,
         Path dataDirectory,
-        boolean readOnly
+        boolean readOnly,
+        Credentials credentials
 ) {
 
     public static final String DEFAULT_HOST = "127.0.0.1";
@@ -29,10 +31,19 @@ public record KoraServerConfig(
             throw new IllegalArgumentException("Invalid port: " + port);
         }
         if (backlog <= 0) backlog = DEFAULT_BACKLOG;
+        if (credentials == null) credentials = Credentials.NONE;
+    }
+
+    public KoraServerConfig(String host, int port, int backlog, Path dataDirectory, boolean readOnly) {
+        this(host, port, backlog, dataDirectory, readOnly, Credentials.NONE);
     }
 
     public KoraServerConfig(String host, int port, int backlog, Path dataDirectory) {
         this(host, port, backlog, dataDirectory, false);
+    }
+
+    public KoraServerConfig withCredentials(Credentials credentials) {
+        return new KoraServerConfig(host, port, backlog, dataDirectory, readOnly, credentials);
     }
 
     public static KoraServerConfig inMemory(int port) {

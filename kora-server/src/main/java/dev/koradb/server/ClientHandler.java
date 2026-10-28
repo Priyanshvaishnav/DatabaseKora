@@ -10,10 +10,7 @@ import dev.koradb.transaction.lock.DeadlockException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import dev.koradb.sql.ast.*;
-import dev.koradb.sql.lexer.Lexer;
-import dev.koradb.sql.lexer.Token;
-import dev.koradb.sql.parser.Parser;
+import dev.koradb.sql.ReadOnlyCheck;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -34,6 +31,7 @@ public final class ClientHandler implements Runnable, AutoCloseable {
     private final KoraDB db;
     private final long connectionId;
     private final boolean readOnly;
+    private final Credentials credentials;
     private final java.util.function.Consumer<ClientHandler> onDisconnect;
     private final Session session;
 
@@ -41,14 +39,20 @@ public final class ClientHandler implements Runnable, AutoCloseable {
     private BufferedInputStream in;
     private BufferedOutputStream out;
 
-    public ClientHandler(Socket socket, KoraDB db, long connectionId, boolean readOnly, java.util.function.Consumer<ClientHandler> onDisconnect) {
+    public ClientHandler(Socket socket, KoraDB db, long connectionId, boolean readOnly, Credentials credentials,
+                         java.util.function.Consumer<ClientHandler> onDisconnect) {
         this.socket = socket;
         this.db = db;
         this.connectionId = connectionId;
         this.readOnly = readOnly;
+        this.credentials = credentials != null ? credentials : Credentials.NONE;
         this.onDisconnect = onDisconnect;
         this.session = db.createSession();
         this.session.setDefaultIsolationLevel(dev.koradb.transaction.IsolationLevel.SNAPSHOT);
+    }
+
+    public ClientHandler(Socket socket, KoraDB db, long connectionId, boolean readOnly, java.util.function.Consumer<ClientHandler> onDisconnect) {
+        this(socket, db, connectionId, readOnly, Credentials.NONE, onDisconnect);
     }
 
     public ClientHandler(Socket socket, KoraDB db, long connectionId, java.util.function.Consumer<ClientHandler> onDisconnect) {
@@ -69,6 +73,12 @@ public final class ClientHandler implements Runnable, AutoCloseable {
             }
             if (!(initialMsg instanceof ConnectMessage connect)) {
                 ProtocolCodec.writeMessage(out, new ErrorMessage(ErrorMessage.ERR_PROTOCOL, "Expected CONNECT message"));
+                return;
+            }
+            if (!credentials.accepts(connect.user(), connect.password())) {
+                log.warn("Authentication failed for user '{}' from {} (connId={})",
+                        connect.user(), socket.getRemoteSocketAddress(), connectionId);
+                ProtocolCodec.writeMessage(out, new ErrorMessage(ErrorMessage.ERR_AUTH, "Authentication failed: wrong user name or password"));
                 return;
             }
 
@@ -183,18 +193,18 @@ public final class ClientHandler implements Runnable, AutoCloseable {
             }
 
             if (readOnly) {
+                boolean writes;
                 try {
-                    List<Token> tokens = new Lexer(sql).tokenize();
-                    Statement stmt = new Parser(tokens).parse();
-                    if (isMutatingStatement(stmt)) {
-                        ProtocolCodec.writeMessage(out, new ErrorMessage(
-                                ErrorMessage.ERR_EXECUTION,
-                                "Cannot execute mutating statement on read-only replica: " + sql
-                        ));
-                        return;
-                    }
-                } catch (Exception ignored) {
-                    // Let execution engine report syntax or parsing errors
+                    writes = ReadOnlyCheck.firstWrite(sql).isPresent();
+                } catch (dev.koradb.exception.ParseException pe) {
+                    writes = false;     // the engine rejects it with the same parse error
+                }
+                if (writes) {
+                    ProtocolCodec.writeMessage(out, new ErrorMessage(
+                            ErrorMessage.ERR_EXECUTION,
+                            "Cannot execute mutating statement on read-only replica: " + sql
+                    ));
+                    return;
                 }
             }
 
@@ -252,18 +262,6 @@ public final class ClientHandler implements Runnable, AutoCloseable {
             onDisconnect.accept(this);
         }
         log.info("Client disconnected: {} (connId={})", socket.getRemoteSocketAddress(), connectionId);
-    }
-
-    private boolean isMutatingStatement(Statement stmt) {
-        return stmt instanceof InsertStmt
-                || stmt instanceof UpdateStmt
-                || stmt instanceof DeleteStmt
-                || stmt instanceof CreateTableStmt
-                || stmt instanceof DropTableStmt
-                || stmt instanceof CreateIndexStmt
-                || stmt instanceof DropIndexStmt
-                || stmt instanceof CreateDatabaseStmt
-                || stmt instanceof DropDatabaseStmt;
     }
 
     public long getConnectionId() {

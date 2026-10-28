@@ -32,6 +32,13 @@ spec:
               value: "PRIMARY"
             - name: KORA_HOST
               value: "0.0.0.0"
+            {{- if .Values.auth.existingSecret }}
+            - name: KORA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.passwordKey | default "password" }}
+            {{- end }}
           ports:
             - name: sql
               containerPort: 8765

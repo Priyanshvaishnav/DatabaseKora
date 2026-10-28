@@ -71,7 +71,15 @@ KoraDB is built to run as a first-class cloud-native relational database engine.
 | `KORA_REPLICA_ID` | `--replica-id` | Pod hostname / UUID | Unique replica identifier |
 | `KORA_METRICS_ENABLED` | `--no-metrics` | `true` | Enable/disable Prometheus HTTP exporter |
 | `KORA_METRICS_PORT` | `--metrics-port` | `9100` | HTTP metrics and `/health` probe port |
+| `KORA_USER` | `--user` | `kora` | User name clients present when a password is set |
+| `KORA_PASSWORD` | `--password` | none | Password required on the SQL port, the HTTP API (except `/v1/health`) and the replication port. All nodes of a cluster use the same one |
+| `KORA_PASSWORD_FILE` | `--password-file` | none | Read the password from a file (Docker / Kubernetes secret); wins over `KORA_PASSWORD` |
 | `JAVA_OPTS` | N/A | `-XX:MaxRAMPercentage=75.0 ...` | JVM memory and GC ergonomics |
+
+> **Security:** containers bind `0.0.0.0`. Without `KORA_PASSWORD` anyone who can reach the SQL, HTTP or
+> replication port can read and change every row, and the server logs a `SECURITY` warning at startup.
+> Set a password before publishing these ports. Connections are not encrypted (no TLS): keep them on a
+> private network or put a TLS-terminating proxy in front. The metrics port exposes counters only and stays open.
 
 ---
 

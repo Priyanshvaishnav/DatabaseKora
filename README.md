@@ -199,6 +199,27 @@ const data = await res.json();
 console.log(data.rows);
 ```
 
+### 6. Authentication
+
+By default a server needs no password, which is fine while it only listens on `127.0.0.1`. Before you
+bind it to another interface (containers bind `0.0.0.0`), start it with a password. The SQL port, the
+HTTP API (all endpoints except `/v1/health`) and the replication port then require it, and replicas
+must be started with the same password:
+
+```bash
+KORA_PASSWORD=change-me koradb-server --data-dir ./data          # or --password / --password-file
+koradb-cli -u kora                                               # reads KORA_PASSWORD
+curl -u kora:change-me -X POST http://localhost:8080/v1/query -d "SELECT 1"
+```
+
+```java
+DriverManager.getConnection("jdbc:koradb://localhost:8765/orders_db", "kora", "change-me");
+// Spring Boot: spring.datasource.username=kora / spring.datasource.password=change-me
+```
+
+A wrong password fails with SQLState `28000` (JDBC) or HTTP `401`. Traffic is not encrypted: keep the
+ports on a private network or put a TLS-terminating proxy in front.
+
 ---
 
 ### Run All Tests

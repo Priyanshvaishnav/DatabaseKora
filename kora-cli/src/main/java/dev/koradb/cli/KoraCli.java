@@ -90,7 +90,8 @@ public final class KoraCli {
             return 0;
         }
 
-        try (KoraClient client = KoraClient.connect(config.host(), config.port(), config.database())) {
+        try (KoraClient client = KoraClient.connect(config.host(), config.port(), config.database(),
+                config.user(), config.password())) {
             // One-shot execution mode (-e "<sql>")
             if (config.executeSql() != null && !config.executeSql().isBlank()) {
                 return executeOneShot(client, config.executeSql());
@@ -406,6 +407,9 @@ public final class KoraCli {
                   -p, --port <PORT>      Database server port (default: 8765)
                   -d, --database <DB>    Initial database to select
                   -e, --execute <SQL>    Execute SQL statement and exit immediately
+                  -u, --user <NAME>      User name, for servers started with a password (env: KORA_USER)
+                  --password <SECRET>    Password (env: KORA_PASSWORD; prefer the env var so the
+                                         password does not appear in the process list)
                   -v, --version          Print version information and exit
                   --help                 Show this help message and exit
                 """);

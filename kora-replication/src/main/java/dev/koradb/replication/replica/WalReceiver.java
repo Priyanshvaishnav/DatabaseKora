@@ -70,7 +70,7 @@ public final class WalReceiver implements AutoCloseable {
         this.out = new BufferedOutputStream(socket.getOutputStream());
 
         long startLsn = walApplier.getAppliedLsn();
-        HandshakeRequest req = new HandshakeRequest(config.replicaId(), startLsn, config.mode());
+        HandshakeRequest req = new HandshakeRequest(config.replicaId(), startLsn, config.mode(), config.authToken());
         ReplicationCodec.writeMessage(req, out);
 
         ReplicationMessage respMsg = ReplicationCodec.readMessage(in);

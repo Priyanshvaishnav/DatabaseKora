@@ -15,6 +15,13 @@ cluster:
   replicationMode: ASYNC  # ASYNC or SYNC
   metricsPort: 9100
 
+# Password required on the SQL port, HTTP API and replication port (shared by all pods).
+# Create the secret first:  kubectl create secret generic koradb-auth --from-literal=password=...
+# Leave existingSecret empty to run without authentication (not recommended outside a private network).
+auth:
+  existingSecret: ""
+  passwordKey: password
+
 primary:
   replicaCount: 1
   resources:

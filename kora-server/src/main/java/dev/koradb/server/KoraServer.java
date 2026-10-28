@@ -98,6 +98,7 @@ public final class KoraServer implements AutoCloseable {
                         db,
                         connId,
                         config.readOnly(),
+                        config.credentials(),
                         activeHandlers::remove
                 );
 

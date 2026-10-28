@@ -14,14 +14,39 @@
     <artifactId>kora-tests</artifactId>
     <name>KoraDB Integration Tests</name>
     <description>
-        Cross-module integration and end-to-end tests.
-        Grows as modules are added.
+        Cross-module integration and end-to-end tests, including the regression suite for
+        every FAIL/WARN of the end-to-end test report (dev.koradb.e2e).
     </description>
 
     <dependencies>
         <dependency>
             <groupId>dev.koradb</groupId>
             <artifactId>kora-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>dev.koradb</groupId>
+            <artifactId>kora-server</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>dev.koradb</groupId>
+            <artifactId>kora-jdbc</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>dev.koradb</groupId>
+            <artifactId>kora-ai</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>dev.koradb</groupId>
+            <artifactId>kora-replication</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>dev.koradb</groupId>
+            <artifactId>kora-observability</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

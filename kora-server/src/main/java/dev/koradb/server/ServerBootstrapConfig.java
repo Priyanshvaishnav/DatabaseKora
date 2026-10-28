@@ -26,7 +26,8 @@ public record ServerBootstrapConfig(
         boolean metricsEnabled,
         int metricsPort,
         boolean httpEnabled,
-        int httpPort
+        int httpPort,
+        Credentials credentials
 ) {
 
     public static final String DEFAULT_HOST = "127.0.0.1";
@@ -42,6 +43,38 @@ public record ServerBootstrapConfig(
         Objects.requireNonNull(replicationMode, "replicationMode must not be null");
         Objects.requireNonNull(primaryHost, "primaryHost must not be null");
         Objects.requireNonNull(replicaId, "replicaId must not be null");
+        if (credentials == null) credentials = Credentials.NONE;
+    }
+
+    /** Constructor without credentials (authentication off). */
+    public ServerBootstrapConfig(
+            String host,
+            int port,
+            Path dataDir,
+            NodeRole role,
+            int replicationPort,
+            ReplicationMode replicationMode,
+            String primaryHost,
+            int primaryPort,
+            String replicaId,
+            boolean metricsEnabled,
+            int metricsPort,
+            boolean httpEnabled,
+            int httpPort
+    ) {
+        this(host, port, dataDir, role, replicationPort, replicationMode, primaryHost, primaryPort, replicaId,
+                metricsEnabled, metricsPort, httpEnabled, httpPort, Credentials.NONE);
+    }
+
+    public ServerBootstrapConfig withCredentials(Credentials credentials) {
+        return new ServerBootstrapConfig(host, port, dataDir, role, replicationPort, replicationMode, primaryHost,
+                primaryPort, replicaId, metricsEnabled, metricsPort, httpEnabled, httpPort, credentials);
+    }
+
+    /** True when the SQL, HTTP or replication listeners accept connections from other machines. */
+    public boolean bindsBeyondLoopback() {
+        String h = host.trim().toLowerCase(java.util.Locale.ROOT);
+        return !(h.equals("localhost") || h.startsWith("127.") || h.equals("::1") || h.equals("[::1]"));
     }
 
     /**
@@ -96,6 +129,10 @@ public record ServerBootstrapConfig(
         boolean httpEnabled = httpEnv == null || (!"false".equalsIgnoreCase(httpEnv) && !"0".equals(httpEnv));
         int httpPort = getEnvIntOrDefault("KORA_HTTP_PORT", DEFAULT_HTTP_PORT);
 
+        String user = getEnvOrDefault("KORA_USER", Credentials.DEFAULT_USER);
+        String password = System.getenv("KORA_PASSWORD");
+        String passwordFile = System.getenv("KORA_PASSWORD_FILE");
+
         // 2. Parse CLI args to override
         if (args != null) {
             for (int i = 0; i < args.length; i++) {
@@ -140,6 +177,15 @@ public record ServerBootstrapConfig(
                     }
                     case "--no-http" -> httpEnabled = false;
                     case "--http" -> httpEnabled = true;
+                    case "--user" -> {
+                        if (++i < args.length) user = args[i];
+                    }
+                    case "--password" -> {
+                        if (++i < args.length) password = args[i];
+                    }
+                    case "--password-file" -> {
+                        if (++i < args.length) passwordFile = args[i];
+                    }
                     case "--help", "-v", "--version" -> {
                         // Handled by main() caller
                     }
@@ -165,8 +211,30 @@ public record ServerBootstrapConfig(
                 metricsEnabled,
                 metricsPort,
                 httpEnabled,
-                httpPort
+                httpPort,
+                new Credentials(user, resolvePassword(password, passwordFile))
         );
+    }
+
+    /** A password file (Docker / Kubernetes secret) wins over a literal password; trailing newlines are dropped. */
+    private static String resolvePassword(String password, String passwordFile) {
+        if (passwordFile != null && !passwordFile.isBlank()) {
+            try {
+                return Files.readString(Path.of(passwordFile.trim())).strip();
+            } catch (java.io.IOException e) {
+                throw new IllegalArgumentException("Cannot read password file '" + passwordFile + "': " + e.getMessage(), e);
+            }
+        }
+        return password != null ? password : "";
+    }
+
+    @Override
+    public String toString() {
+        return "ServerBootstrapConfig[host=" + host + ", port=" + port + ", dataDir=" + dataDir + ", role=" + role
+                + ", replicationPort=" + replicationPort + ", replicationMode=" + replicationMode
+                + ", primary=" + primaryHost + ":" + primaryPort + ", replicaId=" + replicaId
+                + ", metrics=" + (metricsEnabled ? metricsPort : "off") + ", http=" + (httpEnabled ? httpPort : "off")
+                + ", " + credentials + "]";
     }
 
     private static NodeRole parseRole(String roleStr) {

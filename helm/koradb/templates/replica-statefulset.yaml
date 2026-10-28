@@ -33,6 +33,13 @@ spec:
               value: "REPLICA"
             - name: KORA_HOST
               value: "0.0.0.0"
+            {{- if .Values.auth.existingSecret }}
+            - name: KORA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.passwordKey | default "password" }}
+            {{- end }}
             - name: KORA_PRIMARY_HOST
               value: "{{ include "koradb.primary.fullname" . }}-0.{{ include "koradb.primary.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
             - name: KORA_PRIMARY_PORT
