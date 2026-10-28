@@ -1,6 +1,7 @@
 package dev.koradb.transaction;
 
 import dev.koradb.catalog.*;
+import dev.koradb.mvcc.ReadView;
 import dev.koradb.sql.ast.ColumnDef;
 import dev.koradb.sql.ast.DataType;
 import dev.koradb.transaction.lock.LockManager;
@@ -81,6 +82,52 @@ class TransactionManagerTest {
         // Aborting an already aborted transaction is idempotent
         transactionManager.abortTransaction(txn);
         assertThat(txn.getState()).isEqualTo(TransactionState.ABORTED);
+    }
+
+    /** Takes a ReadView the moment a txn's locks are released, as a reader woken by them would. */
+    private static final class SnapshotOnReleaseLockManager extends LockManager {
+        TransactionManager txnManager;
+        ReadView viewAtRelease;
+        boolean activeAtRelease;
+
+        @Override
+        public void releaseAll(TransactionId txnId) {
+            activeAtRelease = txnManager.isActive(txnId.value());
+            viewAtRelease = txnManager.createReadView(null);
+            super.releaseAll(txnId);
+        }
+    }
+
+    @Test
+    @DisplayName("A reader woken by a commit's lock release sees the committed rows")
+    void testCommitLeavesActiveSetBeforeReleasingLocks() {
+        SnapshotOnReleaseLockManager locks = new SnapshotOnReleaseLockManager();
+        TransactionManager tm = new TransactionManager(locks, catalog);
+        locks.txnManager = tm;
+
+        Transaction writer = tm.beginTransaction();
+        locks.acquireExclusive(writer.getId(), LockResource.table("users"));
+        tm.commitTransaction(writer);
+
+        assertThat(locks.activeAtRelease).isFalse();
+        assertThat(locks.viewAtRelease.getActiveTxnIds()).doesNotContain(writer.getId().value());
+        assertThat(locks.viewAtRelease.isVisible(writer.getId().value(), 0L)).isTrue();
+    }
+
+    @Test
+    @DisplayName("A reader woken by an abort's lock release does not see the txn as in flight")
+    void testAbortLeavesActiveSetBeforeReleasingLocks() {
+        SnapshotOnReleaseLockManager locks = new SnapshotOnReleaseLockManager();
+        TransactionManager tm = new TransactionManager(locks, catalog);
+        locks.txnManager = tm;
+
+        Transaction writer = tm.beginTransaction();
+        locks.acquireExclusive(writer.getId(), LockResource.table("users"));
+        tm.abortTransaction(writer);
+
+        assertThat(locks.activeAtRelease).isFalse();
+        assertThat(locks.viewAtRelease.getActiveTxnIds()).doesNotContain(writer.getId().value());
+        assertThat(locks.viewAtRelease.isVisible(writer.getId().value(), 0L)).isFalse();
     }
 
     @Test
