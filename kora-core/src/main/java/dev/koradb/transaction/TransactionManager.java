@@ -184,9 +184,11 @@ public class TransactionManager {
         txn.markCommitted();
         committedTxnIds.put(txn.getId().value(), Boolean.TRUE);
 
-        // Release all SS2PL locks held by this transaction
-        lockManager.releaseAll(txn.getId());
+        // Leave the active set BEFORE releasing the SS2PL locks: a reader blocked on one of them
+        // takes its ReadView as soon as it wakes up, and must not see this txn as still in flight
+        // (it would then miss the rows this txn just committed).
         activeTransactions.remove(txn.getId());
+        lockManager.releaseAll(txn.getId());
         notifyOutcome(txn, true);
         log.debug("Transaction {} committed successfully", txn.getId());
     }
@@ -242,9 +244,10 @@ public class TransactionManager {
             // Publish the abort only AFTER every change is undone (finally runs after the rollback).
             // While rollback runs, this txn's xmax must keep blocking other writers; otherwise a writer
             // could stamp a row the rollback is about to restore, resurrecting a second live version.
+            // As in commitTransaction(): leave the active set before the locks are released.
             abortedTxnIds.put(txn.getId().value(), Boolean.TRUE);
-            lockManager.releaseAll(txn.getId());
             activeTransactions.remove(txn.getId());
+            lockManager.releaseAll(txn.getId());
         }
         notifyOutcome(txn, false);
         log.debug("Transaction {} aborted and rolled back", txn.getId());
