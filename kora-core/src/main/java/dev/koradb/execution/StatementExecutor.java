@@ -692,26 +692,9 @@ public final class StatementExecutor {
         };
     }
 
-    /**
-     * Accepts 'yyyy-MM-dd HH:mm:ss', an ISO 'T' separator, optional fractional seconds (as sent by
-     * JDBC Timestamp.toString()) and a bare date (midnight). TIMESTAMP is stored with second
-     * precision, so fractional seconds are truncated.
-     */
-    private static final DateTimeFormatter LENIENT_TIMESTAMP = new java.time.format.DateTimeFormatterBuilder()
-            .appendPattern("yyyy-MM-dd")
-            .optionalStart().appendLiteral(' ').optionalEnd()
-            .optionalStart().appendLiteral('T').optionalEnd()
-            .optionalStart().appendPattern("HH:mm:ss")
-            .optionalStart().appendFraction(java.time.temporal.ChronoField.NANO_OF_SECOND, 0, 9, true).optionalEnd()
-            .optionalEnd()
-            .parseDefaulting(java.time.temporal.ChronoField.HOUR_OF_DAY, 0)
-            .parseDefaulting(java.time.temporal.ChronoField.MINUTE_OF_HOUR, 0)
-            .parseDefaulting(java.time.temporal.ChronoField.SECOND_OF_MINUTE, 0)
-            .toFormatter();
-
     private LocalDateTime parseTimestamp(String s, String colName) {
         try {
-            return LocalDateTime.parse(s.trim(), LENIENT_TIMESTAMP).withNano(0);
+            return TimestampParser.parse(s);
         } catch (DateTimeParseException e) {
             throw new ExecutionException(
                     ("Cannot parse '%s' as TIMESTAMP for column '%s'. " +

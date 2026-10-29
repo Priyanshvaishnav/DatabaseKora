@@ -62,6 +62,9 @@ public class KoraPreparedStatement extends KoraStatement implements PreparedStat
         return sb.toString();
     }
 
+    private static final java.time.format.DateTimeFormatter TIMESTAMP_LITERAL =
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
     private String formatSqlLiteral(Object val) {
         if (val == null) {
             return "NULL";
@@ -69,12 +72,13 @@ public class KoraPreparedStatement extends KoraStatement implements PreparedStat
         if (val instanceof Number || val instanceof Boolean) {
             return val.toString();
         }
-        // Dates/times: the server's TIMESTAMP format (second precision), not Timestamp.toString()
+        // Dates/times: the server's TIMESTAMP format (second precision). Not LocalDateTime.toString(),
+        // which drops ":00" seconds ("2020-06-11T07:53").
         if (val instanceof java.sql.Timestamp ts) {
-            return "'" + ts.toLocalDateTime().withNano(0).toString().replace('T', ' ') + "'";
+            return "'" + TIMESTAMP_LITERAL.format(ts.toLocalDateTime()) + "'";
         }
         if (val instanceof java.time.LocalDateTime ldt) {
-            return "'" + ldt.withNano(0).toString().replace('T', ' ') + "'";
+            return "'" + TIMESTAMP_LITERAL.format(ldt) + "'";
         }
         if (val instanceof java.sql.Date d) {
             return "'" + d.toLocalDate() + " 00:00:00'";
