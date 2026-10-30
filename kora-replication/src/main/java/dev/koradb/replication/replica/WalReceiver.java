@@ -31,6 +31,7 @@ public final class WalReceiver implements AutoCloseable {
 
     private final AtomicLong lastReceivedLsn = new AtomicLong(LogManager.WAL_HEADER_SIZE);
     private final AtomicLong lastHeartbeatTime = new AtomicLong(System.currentTimeMillis());
+    private volatile long catchUpLsn = LogManager.WAL_HEADER_SIZE;
 
     private volatile boolean running = false;
     private volatile boolean connected = false;
@@ -84,6 +85,7 @@ public final class WalReceiver implements AutoCloseable {
         }
 
         this.connected = true;
+        this.catchUpLsn = resp.currentLsn();
         this.lastReceivedLsn.set(resp.currentLsn());
         this.lastHeartbeatTime.set(System.currentTimeMillis());
 
@@ -169,6 +171,28 @@ public final class WalReceiver implements AutoCloseable {
         synchronized (writeLock) {
             ReplicationCodec.writeMessage(ack, out);
         }
+    }
+
+    /** True once everything the primary had flushed when this replica connected has been applied. */
+    public boolean hasCaughtUp() {
+        return walApplier.getAppliedLsn() >= catchUpLsn;
+    }
+
+    /** Waits for {@link #hasCaughtUp()}; returns false on timeout or when the connection is lost. */
+    public boolean awaitCatchUp(long timeoutMillis) {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        while (!hasCaughtUp()) {
+            if (!connected || System.currentTimeMillis() >= deadline) {
+                return false;
+            }
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return true;
     }
 
     public boolean isConnected() {

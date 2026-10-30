@@ -101,11 +101,13 @@ public class TransactionManager {
         // createReadView(): a snapshot taken in between would see an id below its high watermark
         // that is neither active nor committed, and could treat its uncommitted writes as visible.
         synchronized (snapshotLock) {
-            id = new TransactionId(nextTxnId.getAndIncrement());
+            id = new TransactionId(following ? localReaderIds.getAndIncrement() : nextTxnId.getAndIncrement());
             txn = new Transaction(id, isolationLevel);
             activeTransactions.put(id, txn);
         }
-        ensureReserved(id.value());
+        if (!following) {
+            ensureReserved(id.value());
+        }
         txn.setAbortedCheck(this::isAborted);
         // With a catalog, BEGIN is written lazily into the WAL of the database the transaction
         // first modifies (Transaction.bindWal). An explicitly supplied LogManager (no catalog)
@@ -297,7 +299,71 @@ public class TransactionManager {
         return nextTxnId.get();
     }
 
+    // ---- following a primary (replica) ----
+
+    /** Ids of a replica's own (read-only) transactions: never the same as a transaction of the primary. */
+    private final AtomicLong localReaderIds = new AtomicLong(1L << 62);
+    private volatile boolean following = false;
+    /** Transactions of the primary with changes applied here and no COMMIT or END yet. */
+    private final java.util.Set<Long> remoteInFlight = ConcurrentHashMap.newKeySet();
+    /** The order in which transactions of the primary committed here. */
+    private final ConcurrentMap<Long, Long> remoteCommitOrder = new ConcurrentHashMap<>();
+    private long remoteCommits = 0L;   // guarded by snapshotLock
+
+    /** Puts this node in replica mode (see {@link #createReadView}), or takes it out when it is promoted. */
+    public void setFollowing(boolean following) {
+        this.following = following;
+    }
+
+    /** A transaction of the primary changed a page. Call before the change is applied. */
+    public void remoteChange(long txnId) {
+        remoteInFlight.add(txnId);
+    }
+
+    public void remoteCommit(long txnId) {
+        synchronized (snapshotLock) {
+            remoteCommitOrder.put(txnId, ++remoteCommits);   // before the removal: see isCommittedAsOf
+        }
+        recordCommitted(txnId);
+        remoteInFlight.remove(txnId);
+    }
+
+    /** A transaction of the primary is fully rolled back: none of its changes are left on the pages. */
+    public void remoteRolledBack(long txnId) {
+        recordAborted(txnId);
+        remoteInFlight.remove(txnId);
+    }
+
+    private boolean isCommittedAsOf(long txnId, long commitsAtSnapshot) {
+        if (remoteInFlight.contains(txnId)) return false;
+        Long order = remoteCommitOrder.get(txnId);
+        // No record of it: its rows were here before this node started following (and it is not aborted).
+        return order == null || order <= commitsAtSnapshot;
+    }
+
+    /**
+     * On a replica, what is finished cannot be derived from transaction ids. They are assigned at
+     * BEGIN on the primary, so a lower id can make its first change here after a higher id has
+     * committed, and a watermark would take it for finished. So the low watermark is 0, which makes
+     * every row's transaction go through this view's own commit check.
+     */
+    private dev.koradb.mvcc.ReadView createFollowerReadView() {
+        long highWatermark;
+        long commitsAtSnapshot;
+        java.util.Set<Long> inFlight;
+        synchronized (snapshotLock) {
+            highWatermark = nextTxnId.get();
+            commitsAtSnapshot = remoteCommits;
+            inFlight = java.util.Set.copyOf(remoteInFlight);
+        }
+        return new dev.koradb.mvcc.ReadView(0L, 0L, highWatermark, inFlight,
+                txnId -> isCommittedAsOf(txnId, commitsAtSnapshot), this::isAborted);
+    }
+
     public dev.koradb.mvcc.ReadView createReadView(Transaction txn) {
+        if (following) {
+            return createFollowerReadView();
+        }
         long creatorId = txn != null ? txn.getId().value() : 0L;
         java.util.Set<Long> activeIds;
         long highWatermark;
