@@ -445,9 +445,9 @@ public final class StatementExecutor {
             int count = 0;
 
             if (table instanceof DiskTable diskTable) {
-                // Disk path: scan with RIDs, delete + reinsert each matched row
+                // Disk path: find the rows with RIDs, delete + reinsert each matched row
                 TableFile tf = diskTable.getTableFile();
-                for (TableFile.RidRow rr : tf.scanWithRids()) {
+                for (TableFile.RidRow rr : candidateRows(stmt.tableName(), stmt.where(), catalog, tf)) {
                     if (matchesWhere(rr.row(), stmt.where(), evaluator)) {
                         Map<String, Object> newVals = assign(rr.row(), stmt, schema, evaluator);
                         Row newRow = new Row(newVals);
@@ -544,9 +544,9 @@ public final class StatementExecutor {
             int count = 0;
 
             if (table instanceof DiskTable diskTable) {
-                // Disk path: scan with RIDs, delete each matched slot
+                // Disk path: find the rows with RIDs, delete each matched slot
                 TableFile tf = diskTable.getTableFile();
-                for (TableFile.RidRow rr : tf.scanWithRids()) {
+                for (TableFile.RidRow rr : candidateRows(stmt.tableName(), stmt.where(), catalog, tf)) {
                     if (matchesWhere(rr.row(), stmt.where(), evaluator)) {
                         tf.deleteRow(rr.rid(), txn);
                         // Index entries are kept: the deleted version is still visible to older
@@ -613,6 +613,26 @@ public final class StatementExecutor {
             newVals.put(col.name(), value);
         }
         return newVals;
+    }
+
+    /**
+     * The rows visible to this statement that an UPDATE or DELETE has to evaluate its WHERE on: those
+     * an index finds when it can, otherwise the whole table. The list is complete before the first
+     * change, so a row whose key the statement changes is not visited again.
+     */
+    private List<TableFile.RidRow> candidateRows(String tableName, Optional<WhereClause> where, Catalog catalog, TableFile tf) {
+        Optional<List<RecordId>> rids = where.flatMap(w -> IndexLookup.candidates(tableName, w, catalog));
+        if (rids.isEmpty()) {
+            return tf.scanWithRids();
+        }
+        List<TableFile.RidRow> rows = new ArrayList<>(rids.get().size());
+        for (RecordId rid : rids.get()) {
+            Row row = tf.readRow(rid);       // null: not visible to this snapshot
+            if (row != null) {
+                rows.add(new TableFile.RidRow(rid, row));
+            }
+        }
+        return rows;
     }
 
     private boolean matchesWhere(Row row, Optional<WhereClause> where, ExpressionEvaluator ev) {

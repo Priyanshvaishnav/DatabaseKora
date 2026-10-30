@@ -307,6 +307,21 @@ public class JdbcLoadTest {
         check(c, "customers present", "SELECT COUNT(*) FROM customers", customers);
         // transfers move credit between customers, so only the total is known
         check(c, "total credit unchanged", "SELECT SUM(credit) FROM customers", CUSTOMERS.stream().mapToDouble(Customer::credit).sum());
+        // the accounts the transfers updated, each read through the primary key
+        int accounts = Math.min(50, customers);
+        double sum = 0;
+        int found = 0;
+        try (PreparedStatement ps = c.prepareStatement("SELECT credit FROM customers WHERE id = ?")) {
+            for (int id = 1; id <= accounts; id++) {
+                ps.setInt(1, id);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) { sum += rs.getDouble(1); found++; }
+                }
+            }
+        }
+        double expected = CUSTOMERS.stream().limit(accounts).mapToDouble(Customer::credit).sum();
+        report("updated rows found by primary key", found == accounts && Math.abs(sum - expected) < 1e-6,
+                found + "/" + accounts + " rows, credit " + sum + " expected " + expected);
         verifyOrders(c, ordersAfterMutations(), "final");
     }
 

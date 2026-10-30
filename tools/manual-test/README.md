@@ -14,7 +14,7 @@ What it checks, in order:
 | 4. DML | `DELETE` and `UPDATE` affected-row counts, then counts, sums and groups after the changes |
 | 5. Rollback | Delete most rows, zero every balance, insert a row, check the transaction sees that, `rollback()`, check everything is back |
 | 6. Concurrency | `--threads` connections transfer money between 50 accounts, retrying on write conflicts; every transfer must commit and the total must not change |
-| Final | The state the database must be in after all of the above |
+| Final | The state the database must be in after all of the above, including the updated accounts read back by primary key |
 
 ## 1. Build and start a server
 
@@ -48,12 +48,9 @@ java -jar kora-cli/target/koradb-cli.jar -u kora -d loadtest -e "SELECT COUNT(*)
 
 (set `KORA_PASSWORD=test123` first).
 
-## Measured on this machine (JDK 25, 2026-10-29)
+## Measured on this machine (JDK 25, 2026-10-30)
 
-20,000 customers / 200,000 orders: 44/44 checks pass; customers load at ~10,000 rows/s, orders at ~55,000 rows/s,
+20,000 customers / 200,000 orders: 45/45 checks pass; customers load at ~10,000 rows/s, orders at ~55,000 rows/s,
 `CREATE INDEX` on 200k rows 3 s, indexed lookup 0.5 ms, full-table `COUNT`/`SUM` 0.3–0.5 s,
-200k x 20k `JOIN` 1–1.3 s. Kill + restart + `--verify-only`: 6/6 pass.
-
-Known slow spot: `UPDATE` and `DELETE` scan the whole table even when the `WHERE` hits an index
-(`UPDATE ... WHERE id = ?` takes ~18 ms on 20k rows, against 0 ms for the same `SELECT`), so the
-concurrency phase takes about 50 s at this size.
+200k x 20k `JOIN` 1–1.3 s, `UPDATE ... WHERE id = ?` 2 ms, concurrency phase 2 s.
+Kill + restart + `--verify-only`: 7/7 pass.

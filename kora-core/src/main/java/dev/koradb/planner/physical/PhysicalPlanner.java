@@ -105,9 +105,12 @@ public final class PhysicalPlanner {
                                 idxCost = CostModel.estimateFilterCost(idxCost, remSel, remaining.size());
                             }
 
+                            // A literal without an exact key (id = 7.5) is left to the scan: this predicate
+                            // is dropped from the filter below, so the key alone must select the rows.
+                            IndexKey key = dev.koradb.execution.IndexLookup.keyFor(val, index.getKeyType());
+
                             // Choose index scan if cheaper or point lookup on unique index
-                            if (idxCost.totalCost() <= fullSeqCost.totalCost() || index.isUnique() || stats.rowCount() >= 10) {
-                                IndexKey key = new IndexKey(val, index.getKeyType());
+                            if (key != null && (idxCost.totalCost() <= fullSeqCost.totalCost() || index.isUnique() || stats.rowCount() >= 10)) {
                                 dev.koradb.execution.operator.Operator op = IndexScanOperator.point(
                                         dt.getTableFile(), table, index, key).qualifiedAs(scan.alias().orElse(null));
 
