@@ -328,7 +328,7 @@ public final class ExpressionEvaluator {
 
     private LocalDateTime parseTimestamp(String s) {
         try {
-            return LocalDateTime.parse(s, TIMESTAMP_FORMAT);
+            return TimestampParser.parse(s);   // same forms as INSERT accepts
         } catch (DateTimeParseException e) {
             throw new ExecutionException(
                     "Cannot parse '%s' as TIMESTAMP. Expected format: yyyy-MM-dd HH:mm:ss".formatted(s));

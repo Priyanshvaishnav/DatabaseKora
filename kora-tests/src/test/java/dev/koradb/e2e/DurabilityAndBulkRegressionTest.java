@@ -77,6 +77,8 @@ class DurabilityAndBulkRegressionTest {
         assertThat(count(db, "SELECT COUNT(*) FROM t WHERE v = 'uncommitted'")).isZero();
         long[] viaIndex = new long[100];
         for (int k = 0; k < 100; k++) viaIndex[k] = count(db, "SELECT COUNT(*) FROM t WHERE k = " + k);
+        // ids 3, 33, ... 273, minus id 3 (committed to k = 99); recovery rebuilt the index UPDATE now uses
+        assertThat(db.execute("UPDATE t SET v = 'after-crash' WHERE k = 3").affectedRows()).isEqualTo(9);
         db.execute("DROP INDEX t_k");
         for (int k = 0; k < 100; k++) {
             assertThat(viaIndex[k]).as("k = " + k).isEqualTo(count(db, "SELECT COUNT(*) FROM t WHERE k = " + k));
@@ -248,6 +250,9 @@ class DurabilityAndBulkRegressionTest {
         primary.close();
         replica.promote();
         replica.execute("INSERT INTO posts VALUES (200, 'after promotion')");
+        // An index created after promotion covers the rows that arrived through replication.
+        replica.execute("CREATE INDEX posts_id ON posts (id)");
+        assertThat(replica.execute("UPDATE posts SET title = 'keyed' WHERE id = 21").affectedRows()).isEqualTo(1);
         replica.close();
         replicaDb.close();
 
@@ -256,5 +261,6 @@ class DurabilityAndBulkRegressionTest {
         assertThat(count(reopened, "SELECT COUNT(*) FROM posts")).isEqualTo(35 + 1 + 1);
         assertThat(count(reopened, "SELECT COUNT(*) FROM posts WHERE title = 'rolledback'")).isZero();
         assertThat(count(reopened, "SELECT COUNT(*) FROM posts WHERE title = 'edited'")).isEqualTo(10);
+        assertThat(count(reopened, "SELECT COUNT(*) FROM posts WHERE id = 21 AND title = 'keyed'")).isEqualTo(1);
     }
 }

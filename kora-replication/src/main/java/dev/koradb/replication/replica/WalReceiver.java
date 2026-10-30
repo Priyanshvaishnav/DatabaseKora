@@ -202,6 +202,11 @@ public final class WalReceiver implements AutoCloseable {
         closeSocket();
         if (receiverThread != null) {
             receiverThread.interrupt();
+            try {
+                receiverThread.join(5000);      // no batch may still be applying when a replica is promoted
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 }

@@ -57,6 +57,7 @@ public final class ReplicationReplica implements AutoCloseable {
 
         if (db.getCatalog() instanceof DiskCatalog dc) {
             dc.setSuppressWalLogging(true);
+            dc.rebuildIndexes();
         }
     }
 
@@ -84,6 +85,7 @@ public final class ReplicationReplica implements AutoCloseable {
         walReceiver.close();
         this.role = NodeRole.PRIMARY;
         if (db.getCatalog() instanceof DiskCatalog dc) {
+            dc.prepareForPromotion();
             dc.setSuppressWalLogging(false);
         }
         log.info("Replica '{}' successfully promoted to PRIMARY (Read-Write enabled)", config.replicaId());

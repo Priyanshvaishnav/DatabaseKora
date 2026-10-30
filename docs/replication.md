@@ -153,11 +153,15 @@ If a synchronous commit times out before the replica acknowledges:
 
 ## 5. DDL Replication & Durability
 
-Replication is not limited to page-level data updates. Schema evolution commands (`CREATE TABLE`, `DROP TABLE`) are first-class citizens in KoraDB's WAL:
+Replication is not limited to page-level data updates. Every schema change (`CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`, `CREATE INDEX`, `DROP INDEX`) is a first-class citizen in KoraDB's WAL. `PRIMARY KEY` and `UNIQUE` are unique indexes, so they replicate as `CREATE UNIQUE INDEX`:
 
-1. **`DdlLogRecord` (Opcode 9)**: Contains the SQL definition of schema modifications.
-2. **Durability on Master**: `DiskCatalog.createTable()` and `dropTable()` write a `DdlLogRecord` to `LogManager` and flush the WAL.
-3. **Replay on Replica**: `WalApplier` decodes the `DdlLogRecord` and invokes local catalog methods with `suppressWalLogging = true` to prevent recursive re-logging on the replica.
+1. **`DdlLogRecord` (Opcode 9)**: Contains the SQL definition of schema modifications, with every name quoted.
+2. **Durability on Master**: `DiskCatalog` writes a `DdlLogRecord` to `LogManager` and flushes the WAL for each of them.
+3. **Replay on Replica**: `WalApplier` decodes the `DdlLogRecord` and invokes local catalog methods with `suppressWalLogging = true` to prevent recursive re-logging on the replica. A replica receives the WAL from the beginning when it restarts, so a statement already in effect is ignored, and replaying a `DROP` + `CREATE` rebuilds the table from the records that follow.
+
+**Indexes on a replica.** `WalApplier` gives each row version it applies an entry in the table's indexes, so a replica answers `WHERE id = ?` through its index. Index files have no WAL of their own, so a replica rebuilds them from its pages each time it starts; this takes one scan of each indexed table.
+
+**Upgrading.** Indexes and constraints created before these records existed are not in the primary's WAL. To get them onto a replica, drop and create them again on the primary.
 
 ---
 
@@ -165,10 +169,12 @@ Replication is not limited to page-level data updates. Schema evolution commands
 
 Replicas in KoraDB are strictly read-only:
 
-- **Mutation Protection**: Any attempt to execute `INSERT`, `UPDATE`, `DELETE`, `CREATE TABLE`, `DROP TABLE`, or `CREATE DATABASE` on a replica throws `ReadOnlyReplicaException`.
+- **Mutation Protection**: Any statement that changes data or schema on a replica throws `ReadOnlyReplicaException` (see `ReadOnlyCheck`).
 - **Lock-Free Consistent Reads**: `SELECT` queries execute against the replica's local storage using MVCC Snapshot Isolation.
-- **Txn Visibility Alignment**: `WalApplier` tracks transaction commit and abort records from the Primary and registers them in the replica's `TransactionManager`. Read views on the replica accurately reflect only primary-committed data versions without acquiring read locks.
+- **Txn Visibility Alignment**: `WalApplier` tracks transaction commit and abort records from the Primary and registers them in the replica's `TransactionManager`.
 - **Pure-Reader Abort Isolation**: Transactions that only perform `SELECT` queries never write undo logs and do not pollute the `abortedTxnIds` map, avoiding ID collisions with primary write transactions.
+
+> **Known limitation: uncommitted changes are visible on a replica.** The WAL is shared by all transactions, so one transaction's commit also ships the records of transactions still open on the primary. A replica shows those changes before they commit, and if it is promoted while they are open they stay, as if committed. Until this is fixed, do not rely on a replica for reads that must only see committed data, and stop writes on the primary before a planned failover.
 
 ---
 
@@ -185,8 +191,9 @@ replica.promote();
 Upon promotion:
 1. The background `WalReceiver` loop disconnects and terminates cleanly.
 2. `NodeRole` transitions from `REPLICA` to `PRIMARY`.
-3. `DiskCatalog.setSuppressWalLogging(false)` re-enables local WAL logging.
-4. Mutation queries (`INSERT`, `UPDATE`, `DELETE`, `CREATE`) are immediately unlocked.
+3. `DiskCatalog.prepareForPromotion()` writes all replicated pages and indexes to disk and resets page LSNs. The node's own WAL holds none of the replicated data, and its LSNs start lower than those of the old primary's WAL, which would make crash recovery skip this node's committed records.
+4. `DiskCatalog.setSuppressWalLogging(false)` re-enables local WAL logging.
+5. Mutation queries (`INSERT`, `UPDATE`, `DELETE`, `CREATE`) are immediately unlocked, with `PRIMARY KEY` and `UNIQUE` enforced.
 
 ### Historical Catch-Up
 When a replica connects for the first time or reconnects after a temporary network partition:

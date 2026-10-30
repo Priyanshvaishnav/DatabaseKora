@@ -84,6 +84,38 @@ class ServerAndApiRegressionTest {
     }
 
     @Test
+    @DisplayName("JDBC setTimestamp with zero seconds round-trips, and WHERE accepts every form INSERT accepts")
+    void timestampWithZeroSeconds() throws Exception {
+        ServerInstance n = node(NodeRole.STANDALONE, false);
+        n.getDb().execute("CREATE DATABASE jdbc_db");
+        try (Connection c = Servers.jdbc(n, "jdbc_db"); Statement s = c.createStatement()) {
+            s.execute("CREATE TABLE ev (id INT, at TIMESTAMP)");
+            try (PreparedStatement ps = c.prepareStatement("INSERT INTO ev VALUES (?, ?)")) {
+                ps.setInt(1, 1);
+                ps.setTimestamp(2, Timestamp.valueOf("2020-06-11 07:53:00"));   // LocalDateTime.toString() = "2020-06-11T07:53"
+                ps.executeUpdate();
+                ps.setInt(1, 2);
+                ps.setObject(2, java.time.LocalDateTime.of(2021, 1, 1, 0, 0));
+                ps.executeUpdate();
+            }
+            try (ResultSet rs = s.executeQuery("SELECT at FROM ev WHERE id = 1")) {
+                rs.next();
+                assertThat(rs.getTimestamp(1)).isEqualTo(Timestamp.valueOf("2020-06-11 07:53:00"));
+            }
+            for (String lit : List.of("2020-06-11 07:53:00", "2020-06-11T07:53", "2020-06-11 07:53", "2020-06-11T07:53:00.000")) {
+                try (ResultSet rs = s.executeQuery("SELECT COUNT(*) FROM ev WHERE at = '" + lit + "'")) {
+                    rs.next();
+                    assertThat(rs.getInt(1)).as(lit).isEqualTo(1);
+                }
+            }
+            try (ResultSet rs = s.executeQuery("SELECT COUNT(*) FROM ev WHERE at >= '2021-01-01'")) {
+                rs.next();
+                assertThat(rs.getInt(1)).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test
     @DisplayName("F-JDBC-08 executeBatch inserts all rows and returns per-statement counts")
     void executeBatch() throws Exception {
         ServerInstance n = node(NodeRole.STANDALONE, false);

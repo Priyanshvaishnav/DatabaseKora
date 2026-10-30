@@ -61,9 +61,9 @@ public class IndexScanOperator implements Operator {
     @Override
     public void open() {
         if (lowKey != null && lowKey.equals(highKey) && lowInclusive && highInclusive) {
-            rids = index.isUnique()
-                    ? index.search(lowKey).map(List::of).orElse(List.of())
-                    : index.searchAll(lowKey);
+            // Also for a unique index: every update of a row adds an entry for its new version, so
+            // one key can have several entries and the first may point at a dead version.
+            rids = index.searchAll(lowKey);
         } else {
             rids = index.rangeScan(lowKey, highKey, lowInclusive, highInclusive);
         }
