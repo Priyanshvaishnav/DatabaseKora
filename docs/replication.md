@@ -171,10 +171,10 @@ Replicas in KoraDB are strictly read-only:
 
 - **Mutation Protection**: Any statement that changes data or schema on a replica throws `ReadOnlyReplicaException` (see `ReadOnlyCheck`).
 - **Lock-Free Consistent Reads**: `SELECT` queries execute against the replica's local storage using MVCC Snapshot Isolation.
-- **Txn Visibility Alignment**: `WalApplier` tracks transaction commit and abort records from the Primary and registers them in the replica's `TransactionManager`.
-- **Pure-Reader Abort Isolation**: Transactions that only perform `SELECT` queries never write undo logs and do not pollute the `abortedTxnIds` map, avoiding ID collisions with primary write transactions.
+- **Only committed data is visible**: The WAL is shared by all transactions, so one transaction's commit also ships the records of transactions still open on the primary. `WalApplier` registers each transaction with the replica's `TransactionManager` before applying its first change, and read views treat it as unfinished until its COMMIT arrives. A read view also records how many commits it has seen, so a snapshot stays stable. Watermarks are not used here: ids are assigned at BEGIN on the primary, so a lower id can make its first change after a higher id has committed.
+- **Local Reader Ids**: The replica's own read-only transactions take ids from a separate range, so they never collide with a transaction of the primary.
 
-> **Known limitation: uncommitted changes are visible on a replica.** The WAL is shared by all transactions, so one transaction's commit also ships the records of transactions still open on the primary. A replica shows those changes before they commit, and if it is promoted while they are open they stay, as if committed. Until this is fixed, do not rely on a replica for reads that must only see committed data, and stop writes on the primary before a planned failover.
+**Known limitations.** A replica does not store the WAL it receives. It therefore learns which transactions are unfinished by receiving the WAL again when it restarts, and `start()` waits for that (up to 60 seconds, then it logs a warning and carries on). A replica that restarted and cannot reach the primary any more cannot tell, and promoting it logs a warning. A transaction opened on a replica before promotion should not be used for writes after it.
 
 ---
 
@@ -191,9 +191,10 @@ replica.promote();
 Upon promotion:
 1. The background `WalReceiver` loop disconnects and terminates cleanly.
 2. `NodeRole` transitions from `REPLICA` to `PRIMARY`.
-3. `DiskCatalog.prepareForPromotion()` writes all replicated pages and indexes to disk and resets page LSNs. The node's own WAL holds none of the replicated data, and its LSNs start lower than those of the old primary's WAL, which would make crash recovery skip this node's committed records.
-4. `DiskCatalog.setSuppressWalLogging(false)` re-enables local WAL logging.
-5. Mutation queries (`INSERT`, `UPDATE`, `DELETE`, `CREATE`) are immediately unlocked, with `PRIMARY KEY` and `UNIQUE` enforced.
+3. `WalApplier.rollBackInFlight()` rolls back every transaction the primary had not finished, including a rollback it died in the middle of, newest change first, using the before-images it kept.
+4. `DiskCatalog.prepareForPromotion()` writes all replicated pages and indexes to disk and resets page LSNs. The node's own WAL holds none of the replicated data, and its LSNs start lower than those of the old primary's WAL, which would make crash recovery skip this node's committed records.
+5. `DiskCatalog.setSuppressWalLogging(false)` re-enables local WAL logging.
+6. Mutation queries (`INSERT`, `UPDATE`, `DELETE`, `CREATE`) are immediately unlocked, with `PRIMARY KEY` and `UNIQUE` enforced.
 
 ### Historical Catch-Up
 When a replica connects for the first time or reconnects after a temporary network partition:

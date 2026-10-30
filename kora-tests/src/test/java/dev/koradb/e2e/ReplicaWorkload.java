@@ -27,11 +27,20 @@ public final class ReplicaWorkload {
         replica.start();
 
         long rows = Long.parseLong(args[2]);
+        long deadline = System.currentTimeMillis() + 60_000;
         while (true) {
             try {
-                if (E2e.count(db, "SELECT COUNT(*) FROM t") == rows) break;
+                long seen = E2e.count(db, "SELECT COUNT(*) FROM t");
+                if (seen == rows) break;
+                if (System.currentTimeMillis() > deadline) {
+                    System.out.println("Gave up waiting: table t has " + seen + " rows, expected " + rows);
+                    System.exit(1);          // the test sees no READY and fails instead of hanging
+                }
             } catch (RuntimeException tableNotThereYet) {
-                // keep waiting
+                if (System.currentTimeMillis() > deadline) {
+                    System.out.println("Gave up waiting for table t: " + tableNotThereYet.getMessage());
+                    System.exit(1);
+                }
             }
             Thread.sleep(50);
         }

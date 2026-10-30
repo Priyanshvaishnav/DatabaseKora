@@ -27,6 +27,7 @@ import java.util.function.Function;
 public final class ReplicationReplica implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(ReplicationReplica.class);
+    private static final long CATCH_UP_WAIT_MS = 60_000L;
 
     private final KoraDB db;
     private final ReplicationReplicaConfig config;
@@ -55,6 +56,7 @@ public final class ReplicationReplica implements AutoCloseable {
         this.walApplier = new WalApplier(db.getCatalog(), db.getTransactionManager(), resolver);
         this.walReceiver = new WalReceiver(config, localLogManager, walApplier, this::unpackSnapshot);
 
+        db.getTransactionManager().setFollowing(true);
         if (db.getCatalog() instanceof DiskCatalog dc) {
             dc.setSuppressWalLogging(true);
             dc.rebuildIndexes();
@@ -62,10 +64,17 @@ public final class ReplicationReplica implements AutoCloseable {
     }
 
     /**
-     * Starts the replica network receiver.
+     * Starts the replica network receiver and waits until it has received what the primary had
+     * when it connected. A replica does not keep the WAL it receives, so only replaying it again
+     * tells which rows on its pages belong to unfinished transactions; until then it must not serve
+     * reads. If this takes longer than {@link #CATCH_UP_WAIT_MS}, it carries on and logs a warning.
      */
     public synchronized void start() throws IOException {
         walReceiver.start();
+        if (!walReceiver.awaitCatchUp(CATCH_UP_WAIT_MS)) {
+            log.warn("Replica '{}' has not caught up with the primary after {} ms: until it has, reads may show "
+                    + "changes of transactions that did not commit", config.replicaId(), CATCH_UP_WAIT_MS);
+        }
         log.info("ReplicationReplica '{}' started, tracking Primary at {}:{}",
                 config.replicaId(), config.primaryHost(), config.primaryPort());
     }
@@ -83,6 +92,15 @@ public final class ReplicationReplica implements AutoCloseable {
 
         log.info("Promoting Replica '{}' to PRIMARY", config.replicaId());
         walReceiver.close();
+        if (!walReceiver.hasCaughtUp()) {
+            log.warn("Promoting replica '{}' before it caught up with the primary: it is missing committed changes, "
+                    + "and its pages may hold changes of unfinished transactions it does not know about", config.replicaId());
+        }
+        int rolledBack = walApplier.rollBackInFlight();
+        if (rolledBack > 0) {
+            log.info("Rolled back {} transaction(s) the primary had not finished", rolledBack);
+        }
+        db.getTransactionManager().setFollowing(false);
         this.role = NodeRole.PRIMARY;
         if (db.getCatalog() instanceof DiskCatalog dc) {
             dc.prepareForPromotion();
