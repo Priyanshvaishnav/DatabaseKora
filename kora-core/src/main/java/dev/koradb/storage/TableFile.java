@@ -338,6 +338,28 @@ public final class TableFile implements AutoCloseable {
         return readRow(rid, dev.koradb.mvcc.MvccContext.getReadView());
     }
 
+    /** Sets every page's LSN to 0 and writes all pages to disk. See {@code DiskCatalog.prepareForPromotion}. */
+    public void clearPageLsns() {
+        for (int pid = 0; pid < diskManager.pageCount(); pid++) {
+            BufferFrame frame = bufferPool.pin(pid);
+            try {
+                frame.getPage().setPageLsn(0L);
+                bufferPool.markDirty(frame);
+            } finally {
+                bufferPool.unpin(frame);
+            }
+        }
+        bufferPool.flushAll();
+    }
+
+    /**
+     * Decodes a stored record image (from a WAL record) without following out-of-line values, which
+     * are never indexed: index keys are limited to a size that is always stored inline.
+     */
+    public Row decodeImage(byte[] image) {
+        return serializer.deserialize(image);
+    }
+
     /**
      * Reads a single row by its {@link RecordId}, visible under the specified ReadView.
      */

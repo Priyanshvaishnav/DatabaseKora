@@ -2,14 +2,20 @@ package dev.koradb.replication.replica;
 
 import dev.koradb.buffer.BufferFrame;
 import dev.koradb.catalog.Catalog;
+import dev.koradb.catalog.Row;
 import dev.koradb.catalog.Schema;
 import dev.koradb.catalog.Table;
+import dev.koradb.exception.SchemaException;
+import dev.koradb.index.Index;
+import dev.koradb.index.IndexKey;
 import dev.koradb.sql.ast.AlterTableStmt;
+import dev.koradb.sql.ast.CreateIndexStmt;
 import dev.koradb.sql.ast.CreateTableStmt;
-import dev.koradb.sql.ast.Statement;
+import dev.koradb.sql.ast.DropIndexStmt;
+import dev.koradb.sql.ast.DropTableStmt;
 import dev.koradb.sql.lexer.Lexer;
-import dev.koradb.sql.lexer.Token;
 import dev.koradb.sql.parser.Parser;
+import dev.koradb.storage.RecordId;
 import dev.koradb.storage.SlottedPage;
 import dev.koradb.storage.TableFile;
 import dev.koradb.storage.wal.*;
@@ -123,6 +129,9 @@ public final class WalApplier {
                 return; // already applied (catch-up overlap / re-delivery)
             }
             SlottedPage sp = new SlottedPage(frame.getPage());
+            List<Index> indexes = catalog != null ? catalog.getIndexesForTable(tableName) : List.of();
+            // Read before the change: the image may replace it in the page
+            Row previous = !indexes.isEmpty() && slot < sp.slotCount() && sp.isAlive(slot) ? tf.decodeImage(sp.getRecord(slot)) : null;
             if (image == null || image.length == 0) {
                 if (sp.isAlive(slot)) {
                     sp.deleteRecord(slot);
@@ -136,38 +145,56 @@ public final class WalApplier {
             }
             frame.getPage().setPageLsn(lsn);
             tf.getBufferPool().markDirty(frame);
+            if (!indexes.isEmpty() && image != null && image.length > 0) {
+                addIndexEntries(indexes, previous, tf.decodeImage(image), new RecordId(pageId, slot));
+            }
         } finally {
             tf.getBufferPool().unpin(frame);
         }
     }
 
+    /**
+     * Gives a stored version its index entries. Stamping xmax on a row rewrites it with the same key,
+     * and the entry from when it was written still applies. Entries of removed rows stay, as on the
+     * primary: they are hints that index readers re-check against the page.
+     */
+    private void addIndexEntries(List<Index> indexes, Row previous, Row stored, RecordId rid) {
+        for (Index index : indexes) {
+            Object key = stored.get(index.getColumnName());
+            if (key != null && (previous == null || !key.equals(previous.get(index.getColumnName())))) {
+                index.insertUnchecked(new IndexKey(key, index.getKeyType()), rid);
+            }
+        }
+    }
+
+    /**
+     * Applies a schema change. A replica receives the whole WAL again when it restarts, so a statement
+     * may already be in effect: that is the expected SchemaException ("already exists", "does not
+     * exist"). Replaying a DROP followed by a CREATE removes the table's file, and the records after
+     * them then rebuild it.
+     */
     private void applyDdl(DdlLogRecord ddl) {
         if (catalog == null) {
             return;
         }
         String sql = ddl.getSql().trim();
         try {
-            List<Token> tokens = new Lexer(sql).tokenize();
-            Statement stmt = new Parser(tokens).parse();
-            if (stmt instanceof CreateTableStmt cts) {
-                Schema schema = new Schema(cts.columnDefs());
-                Table table = new Table(cts.tableName(), schema);
-                try {
-                    catalog.createTable(table);
-                    log.info("Applied DDL CREATE TABLE '{}' on replica", cts.tableName());
-                } catch (Exception e) {
-                    log.debug("DDL CREATE TABLE ignored or already exists: {}", e.getMessage());
-                }
-            } else if (stmt instanceof AlterTableStmt alter) {
-                try {
-                    catalog.addColumn(alter.tableName(), alter.addColumn());
-                    log.info("Applied DDL ALTER TABLE '{}' ADD COLUMN '{}' on replica", alter.tableName(), alter.addColumn().name());
-                } catch (Exception e) {
-                    log.debug("DDL ALTER TABLE ignored: {}", e.getMessage());
+            switch (new Parser(new Lexer(sql).tokenize()).parse()) {
+                case CreateTableStmt s -> catalog.createTable(new Table(s.tableName(), new Schema(s.columnDefs())));
+                case AlterTableStmt s -> catalog.addColumn(s.tableName(), s.addColumn());
+                case DropTableStmt s -> catalog.dropTable(s.tableName());
+                case CreateIndexStmt s -> catalog.createIndex(s.indexName(), s.tableName(), s.columnName(), s.unique());
+                case DropIndexStmt s -> catalog.dropIndex(s.indexName());
+                default -> {
+                    log.warn("Ignoring unexpected DDL at LSN {}: '{}'", ddl.getLsn(), sql);
+                    return;
                 }
             }
+            log.info("Applied DDL on replica: {}", sql);
+        } catch (SchemaException e) {
+            log.debug("DDL already in effect: {} ({})", sql, e.getMessage());
         } catch (Exception e) {
-            log.warn("Error applying DDL at LSN {}: '{}'", ddl.getLsn(), sql, e);
+            log.error("Error applying DDL at LSN {}: '{}'", ddl.getLsn(), sql, e);
         }
     }
 

@@ -380,11 +380,11 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         appendToMeta(db.dir, table);
 
         if (db.logManager != null && !suppressWalLogging) {
-            StringBuilder sb = new StringBuilder("CREATE TABLE ").append(table.getName()).append(" (");
+            StringBuilder sb = new StringBuilder("CREATE TABLE ").append(quoted(table.getName())).append(" (");
             List<ColumnDef> cols = table.getSchema().columns();
             for (int i = 0; i < cols.size(); i++) {
                 if (i > 0) sb.append(", ");
-                sb.append(cols.get(i).name()).append(" ").append(cols.get(i).dataType());
+                sb.append(quoted(cols.get(i).name())).append(" ").append(cols.get(i).dataType());
                 if (cols.get(i).notNull()) sb.append(" NOT NULL");
             }
             sb.append(")");
@@ -392,6 +392,11 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
             db.logManager.flush(lsn);
         }
         log.info("Created table '{}' in database '{}'", table.getName(), db.name);
+    }
+
+    /** An identifier for DDL replayed by replicas: quoted, because it may be a keyword or contain spaces. */
+    private static String quoted(String identifier) {
+        return '"' + identifier + '"';
     }
 
     /** ALTER TABLE ADD COLUMN: switches the table file to the new schema and rewrites its catalog line. */
@@ -414,7 +419,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         tf.alterSchema(tf.getSchema().withColumn(column));
         rewriteTableMeta(db, new Table(tableName, tf.getSchema()));
         if (db.logManager != null && !suppressWalLogging) {
-            long lsn = db.logManager.appendDdl(0L, 0L, "ALTER TABLE " + tableName + " ADD COLUMN " + column.name() + " "
+            long lsn = db.logManager.appendDdl(0L, 0L, "ALTER TABLE " + quoted(tableName) + " ADD COLUMN " + quoted(column.name()) + " "
                     + column.dataType() + (column.notNull() ? " NOT NULL" : ""));
             db.logManager.flush(lsn);
         }
@@ -447,7 +452,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         }
         rewriteMeta(db);
         if (db.logManager != null && !suppressWalLogging) {
-            long lsn = db.logManager.appendDdl(0L, 0L, "DROP TABLE " + tableName);
+            long lsn = db.logManager.appendDdl(0L, 0L, "DROP TABLE " + quoted(tableName));
             db.logManager.flush(lsn);
         }
         log.info("Dropped table '{}' from database '{}'", tableName, db.name);
@@ -494,8 +499,9 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         dev.koradb.index.BPlusTree bTree = new dev.koradb.index.BPlusTree(
                 indexName, tableName, columnName, colType, unique, bp);
         try {
-            // Unique check over the rows visible now ...
-            if (unique) {
+            // Unique check over the rows visible now (not on a replica: the primary already made it,
+            // and a replica catching up may be looking at pages newer than this statement) ...
+            if (unique && !suppressWalLogging) {
                 Set<Object> seen = new HashSet<>();
                 for (TableFile.RidRow rr : tf.scanWithRids()) {
                     Object val = rr.row().get(columnName);
@@ -520,7 +526,55 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         bTree.flush();
         db.indexes.put(indexName.toLowerCase(), bTree);
         appendIndexToMeta(db.dir, indexName, tableName, columnName, unique);
+        if (db.logManager != null && !suppressWalLogging) {
+            long lsn = db.logManager.appendDdl(0L, 0L, "CREATE " + (unique ? "UNIQUE " : "") + "INDEX " + quoted(indexName)
+                    + " ON " + quoted(tableName) + " (" + quoted(columnName) + ")");
+            db.logManager.flush(lsn);
+        }
         log.info("Created index '{}' on {}({}) in database '{}'", indexName, tableName, columnName, db.name);
+    }
+
+    /**
+     * Rebuilds every index of the current database from the stored rows. A replica does this when it
+     * starts: its index files are not covered by a WAL, so after a crash they can be behind its pages,
+     * and the records it receives again leave pages that are already up to date untouched.
+     */
+    public synchronized void rebuildIndexes() {
+        OpenDb db = currentDbName == null ? null : openDbs.get(currentDbName);
+        if (db == null) return;
+        for (dev.koradb.index.BPlusTree old : List.copyOf(db.indexes.values())) {
+            String key = old.getName().toLowerCase();
+            Path indexPath = db.dir.resolve(key + ".idx");
+            old.close();
+            try {
+                Files.deleteIfExists(indexPath);
+            } catch (IOException e) {
+                throw new StorageException("Cannot rebuild index '" + old.getName() + "': " + e.getMessage(), e);
+            }
+            dev.koradb.index.BPlusTree rebuilt = new dev.koradb.index.BPlusTree(old.getName(), old.getTableName(),
+                    old.getColumnName(), old.getKeyType(), old.isUnique(), new BufferPool(new DiskPageManager(indexPath)));
+            for (TableFile.RidRow rr : db.files.get(old.getTableName().toLowerCase()).scanAllVersions()) {
+                Object val = rr.row().get(old.getColumnName());
+                if (val != null) {
+                    rebuilt.insertUnchecked(new dev.koradb.index.IndexKey(val, old.getKeyType()), rr.rid());
+                }
+            }
+            rebuilt.flush();
+            db.indexes.put(key, rebuilt);
+        }
+    }
+
+    /**
+     * Makes a replica's data stand on its own before it is promoted: everything replicated is written
+     * to disk, because its own WAL holds none of it, and pages stop carrying LSNs of the old primary's
+     * WAL. Those are larger than the LSNs of this node's WAL, so crash recovery would take the pages to
+     * be newer than this node's own committed records and skip redoing them.
+     */
+    public synchronized void prepareForPromotion() {
+        OpenDb db = currentDbName == null ? null : openDbs.get(currentDbName);
+        if (db == null) return;
+        withToast(db.files.values()).forEach(TableFile::clearPageLsns);
+        db.indexes.values().forEach(dev.koradb.index.BPlusTree::flush);
     }
 
     synchronized void dropIndexIn(String dbName, String indexName) {
@@ -538,6 +592,10 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
             log.warn("Could not delete index file: {}", indexPath, e);
         }
         rewriteMeta(db);
+        if (db.logManager != null && !suppressWalLogging) {
+            long lsn = db.logManager.appendDdl(0L, 0L, "DROP INDEX " + quoted(indexName));
+            db.logManager.flush(lsn);
+        }
         log.info("Dropped index '{}' from database '{}'", indexName, db.name);
     }
 
