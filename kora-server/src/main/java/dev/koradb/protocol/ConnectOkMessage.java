@@ -3,7 +3,7 @@ package dev.koradb.protocol;
 /**
  * Server connection response acknowledging successful handshake.
  *
- * @param serverVersion server version string (e.g. "KoraDB/0.1.0-SNAPSHOT")
+ * @param serverVersion server version string (e.g. "KoraDB/2.0.1")
  * @param connectionId  unique session connection identifier
  * @param message       welcome greeting or status
  */
@@ -14,7 +14,7 @@ public record ConnectOkMessage(
 ) implements Message {
 
     public ConnectOkMessage {
-        if (serverVersion == null) serverVersion = "KoraDB/0.1.0";
+        if (serverVersion == null) serverVersion = "KoraDB/2.0.1";
         if (message == null) message = "Connected to KoraDB";
     }
 

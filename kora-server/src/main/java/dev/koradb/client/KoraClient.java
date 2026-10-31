@@ -71,7 +71,7 @@ public final class KoraClient implements AutoCloseable {
         BufferedOutputStream out = new BufferedOutputStream(socket.getOutputStream());
 
         // Perform handshake
-        ConnectMessage connectMsg = new ConnectMessage(ConnectMessage.CURRENT_PROTOCOL_VERSION, "KoraClient/0.1.0", database, user, password);
+        ConnectMessage connectMsg = new ConnectMessage(ConnectMessage.CURRENT_PROTOCOL_VERSION, "KoraClient/2.0.1", database, user, password);
         ProtocolCodec.writeMessage(out, connectMsg);
 
         Message resp = ProtocolCodec.readMessage(in);

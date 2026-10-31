@@ -384,7 +384,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
             List<ColumnDef> cols = table.getSchema().columns();
             for (int i = 0; i < cols.size(); i++) {
                 if (i > 0) sb.append(", ");
-                sb.append(quoted(cols.get(i).name())).append(" ").append(cols.get(i).dataType());
+                sb.append(quoted(cols.get(i).name())).append(" ").append(cols.get(i).typeName());
                 if (cols.get(i).notNull()) sb.append(" NOT NULL");
             }
             sb.append(")");
@@ -420,7 +420,7 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
         rewriteTableMeta(db, new Table(tableName, tf.getSchema()));
         if (db.logManager != null && !suppressWalLogging) {
             long lsn = db.logManager.appendDdl(0L, 0L, "ALTER TABLE " + quoted(tableName) + " ADD COLUMN " + quoted(column.name()) + " "
-                    + column.dataType() + (column.notNull() ? " NOT NULL" : ""));
+                    + column.typeName() + (column.notNull() ? " NOT NULL" : ""));
             db.logManager.flush(lsn);
         }
         statsCache.remove(tf);
@@ -963,14 +963,17 @@ public final class DiskCatalog implements Catalog, AutoCloseable {
             if (parts.length != 2 && !(parts.length == 3 && parts[2].equals("NN"))) {
                 throw new StorageException("Invalid column spec '%s' in: %s".formatted(tokens[i], line));
             }
-            cols.add(new ColumnDef(dec(parts[0]), DataType.valueOf(parts[1].toUpperCase()), parts.length == 3));
+            // the type is INT, VARCHAR or VARCHAR(50)
+            String[] type = parts[1].split("[()]");
+            int maxLength = type.length == 2 ? Integer.parseInt(type[1]) : 0;
+            cols.add(new ColumnDef(dec(parts[0]), DataType.valueOf(type[0].toUpperCase()), parts.length == 3, maxLength));
         }
         return new Table(tableName, new Schema(cols, stored));
     }
 
     private String tableToMetaLine(Table table) {
         String cols = table.getSchema().columns().stream()
-                .map(c -> enc(c.name()) + ":" + c.dataType().name() + (c.notNull() ? ":NN" : ""))
+                .map(c -> enc(c.name()) + ":" + c.typeName() + (c.notNull() ? ":NN" : ""))
                 .collect(Collectors.joining(" "));
         // "@stored=N": records written before ALTER TABLE ADD COLUMN have N columns
         String stored = table.getSchema().altered() ? " @stored=" + table.getSchema().storedColumnCount() : "";

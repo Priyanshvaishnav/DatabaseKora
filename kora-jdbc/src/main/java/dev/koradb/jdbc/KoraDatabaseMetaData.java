@@ -45,15 +45,15 @@ public class KoraDatabaseMetaData implements DatabaseMetaData {
     @Override
     public String getDatabaseProductName() throws SQLException { return "KoraDB"; }
     @Override
-    public String getDatabaseProductVersion() throws SQLException { return "0.1.0"; }
+    public String getDatabaseProductVersion() throws SQLException { return "2.0.1"; }
     @Override
     public String getDriverName() throws SQLException { return "KoraDB JDBC Driver"; }
     @Override
-    public String getDriverVersion() throws SQLException { return "0.1.0"; }
+    public String getDriverVersion() throws SQLException { return "2.0.1"; }
     @Override
-    public int getDriverMajorVersion() { return 0; }
+    public int getDriverMajorVersion() { return 2; }
     @Override
-    public int getDriverMinorVersion() { return 1; }
+    public int getDriverMinorVersion() { return 0; }
     @Override
     public boolean usesLocalFiles() throws SQLException { return false; }
     @Override
@@ -308,7 +308,10 @@ public class KoraDatabaseMetaData implements DatabaseMetaData {
                 for (var r : desc.rows()) {
                     if (r.size() >= 2) {
                         String colName = r.get(0).toString();
-                        String typeStr = r.get(1).toString().toUpperCase();
+                        // INT, VARCHAR or VARCHAR(50)
+                        String[] type = r.get(1).toString().toUpperCase().split("[()]");
+                        String typeStr = type[0];
+                        int columnSize = type.length == 2 ? Integer.parseInt(type[1]) : 32;
 
                         int dataType = switch (typeStr) {
                             case "INT"       -> Types.INTEGER;
@@ -321,7 +324,7 @@ public class KoraDatabaseMetaData implements DatabaseMetaData {
 
                         rows.add(List.of(
                                 connection.getCatalog(), "", tableNamePattern, colName,
-                                dataType, typeStr, 32, 0,
+                                dataType, typeStr, columnSize, 0,
                                 0, 10, DatabaseMetaData.columnNullable, "",
                                 "", 0, 0,
                                 32, pos++, "YES"
@@ -438,8 +441,8 @@ public class KoraDatabaseMetaData implements DatabaseMetaData {
     }
     @Override public boolean supportsResultSetHoldability(int holdability) throws SQLException { return true; }
     @Override public int getResultSetHoldability() throws SQLException { return ResultSet.CLOSE_CURSORS_AT_COMMIT; }
-    @Override public int getDatabaseMajorVersion() throws SQLException { return 0; }
-    @Override public int getDatabaseMinorVersion() throws SQLException { return 1; }
+    @Override public int getDatabaseMajorVersion() throws SQLException { return 2; }
+    @Override public int getDatabaseMinorVersion() throws SQLException { return 0; }
     @Override public int getJDBCMajorVersion() throws SQLException { return 4; }
     @Override public int getJDBCMinorVersion() throws SQLException { return 2; }
     @Override public int getSQLStateType() throws SQLException { return sqlStateSQL99; }

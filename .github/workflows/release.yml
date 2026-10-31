@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag name for release (e.g. v0.1.0)'
+        description: 'Tag name for release (e.g. v2.0.1)'
         required: false
-        default: 'v0.1.0'
+        default: 'v2.0.1'
 
 permissions:
   contents: write
@@ -38,7 +38,7 @@ jobs:
         run: |
           VERSION="${{ github.ref_name }}"
           if [ -z "$VERSION" ] || [[ "$VERSION" == *"/"* ]]; then
-            VERSION="${{ github.event.inputs.tag_name || 'v0.1.0' }}"
+            VERSION="${{ github.event.inputs.tag_name || 'v2.0.1' }}"
           fi
           echo "Packaging distribution for version: $VERSION"
 
@@ -74,7 +74,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name || github.event.inputs.tag_name }}
           name: KoraDB ${{ github.ref_name || github.event.inputs.tag_name }}
-          body_path: RELEASE_NOTES_v0.1.0.md
+          body_path: RELEASE_NOTES_v2.0.1.md
           draft: false
           prerelease: false
           files: |

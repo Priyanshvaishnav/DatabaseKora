@@ -253,7 +253,7 @@ public final class Parser {
             for (int i = 0; i < columns.size(); i++) {
                 ColumnDef c = columns.get(i);
                 if (c.name().equalsIgnoreCase(primaryKey[0])) {
-                    columns.set(i, new ColumnDef(c.name(), c.dataType(), true));
+                    columns.set(i, new ColumnDef(c.name(), c.dataType(), true, c.maxLength()));
                     found = true;
                 }
             }
@@ -289,6 +289,7 @@ public final class Parser {
     private ColumnDef parseColumnDef(String[] primaryKey, List<String> unique) {
         String   colName  = consumeIdentifier("column name");
         DataType dataType = parseDataType();
+        int maxLength = dataType == DataType.VARCHAR ? parseVarcharLength() : 0;
         boolean notNull = false;
         while (true) {
             if (check(NOT) && peekType(1) == NULL) {
@@ -309,7 +310,20 @@ public final class Parser {
                 break;
             }
         }
-        return new ColumnDef(colName, dataType, notNull);
+        return new ColumnDef(colName, dataType, notNull, maxLength);
+    }
+
+    /** Optional {@code (n)} after VARCHAR; 0 when there is none. */
+    private int parseVarcharLength() {
+        if (!check(LPAREN)) return 0;
+        advance();
+        Token length = peek();
+        if (length.type() != LITERAL_INT || Integer.parseInt(length.lexeme()) < 1) {
+            throw new ParseException("VARCHAR length must be a whole number of at least 1, found: '" + length.lexeme() + "'", length.line());
+        }
+        advance();
+        consume(RPAREN, ")");
+        return Integer.parseInt(length.lexeme());
     }
 
     private ColumnDef parseColumnDef() {

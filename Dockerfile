@@ -39,7 +39,7 @@ FROM eclipse-temurin:21-jre-jammy
 
 LABEL org.opencontainers.image.title="KoraDB" \
       org.opencontainers.image.description="Relational database engine built from scratch in Java 21" \
-      org.opencontainers.image.version="0.1.0-SNAPSHOT" \
+      org.opencontainers.image.version="2.0.1" \
       org.opencontainers.image.authors="KoraDB Maintainers" \
       org.opencontainers.image.licenses="MIT"
 

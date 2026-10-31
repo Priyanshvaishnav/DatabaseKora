@@ -301,7 +301,7 @@ public final class KoraDB implements AutoCloseable {
             var table = database.getTable(tableName);
             List<Row> rows = new ArrayList<>();
             for (var col : table.getSchema().columns()) {
-                rows.add(new Row(Map.of("column_name", col.name(), "data_type", col.dataType().name())));
+                rows.add(new Row(Map.of("column_name", col.name(), "data_type", col.typeName())));
             }
             return QueryResult.select(rows, List.of("column_name", "data_type"));
         }

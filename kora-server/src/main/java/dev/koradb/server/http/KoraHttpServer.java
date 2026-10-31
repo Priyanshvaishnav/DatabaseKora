@@ -40,7 +40,7 @@ import java.util.concurrent.Executors;
 public final class KoraHttpServer implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(KoraHttpServer.class);
-    public static final String SERVER_VERSION = "0.1.0-SNAPSHOT";
+    public static final String SERVER_VERSION = "2.0.1";
 
     private final KoraHttpConfig config;
     private final KoraDB db;
@@ -400,7 +400,7 @@ public final class KoraHttpServer implements AutoCloseable {
             for (var col : table.getSchema().columns()) {
                 Map<String, Object> colInfo = new LinkedHashMap<>();
                 colInfo.put("name", col.name());
-                colInfo.put("type", col.dataType().name());
+                colInfo.put("type", col.typeName());
                 columns.add(colInfo);
             }
             tableInfo.put("columns", columns);

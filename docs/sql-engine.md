@@ -112,7 +112,7 @@ use_db          ::= USE identifier
 
 create_table    ::= CREATE TABLE identifier '(' column_def (',' column_def)* ')'
 column_def      ::= identifier type_name
-type_name       ::= INT | BIGINT | BOOLEAN | VARCHAR | DOUBLE | TIMESTAMP
+type_name       ::= INT | BIGINT | BOOLEAN | VARCHAR ('(' integer ')')? | DOUBLE | TIMESTAMP
 drop_table      ::= DROP TABLE identifier
 
 insert          ::= INSERT INTO identifier VALUES '(' literal (',' literal)* ')'

@@ -284,7 +284,7 @@ public final class StatementExecutor {
             Object[] typed = new Object[cols.size()];          // unlisted columns are NULL
             for (int i = 0; i < values.size(); i++) {
                 ColumnDef col = cols.get(target[i]);
-                typed[target[i]] = coerce(values.get(i).value(), col.dataType(), col.name());
+                typed[target[i]] = coerce(values.get(i).value(), col);
             }
             for (int c = 0; c < cols.size(); c++) {
                 if (typed[c] == null && cols.get(c).notNull()) {
@@ -605,7 +605,7 @@ public final class StatementExecutor {
         Map<String, Object> newVals = new LinkedHashMap<>(oldRow.values());
         for (UpdateStmt.Assignment a : stmt.assignments()) {
             ColumnDef col = schema.findColumn(a.columnName());
-            Object value = coerce(ev.eval(a.value(), oldRow), col.dataType(), col.name());
+            Object value = coerce(ev.eval(a.value(), oldRow), col);
             if (value == null && col.notNull()) {
                 throw new SchemaException("NULL value in column '%s' of table '%s' violates NOT NULL constraint"
                         .formatted(col.name(), stmt.tableName()));
@@ -712,6 +712,16 @@ public final class StatementExecutor {
         };
     }
 
+    /** Converts to the column's type and enforces the length of a {@code VARCHAR(n)} column. */
+    private Object coerce(Object raw, ColumnDef col) {
+        Object value = coerce(raw, col.dataType(), col.name());
+        if (col.maxLength() > 0 && value instanceof String s && s.codePointCount(0, s.length()) > col.maxLength()) {
+            throw new ExecutionException("Value is too long for column '%s' of type %s (%d characters)"
+                    .formatted(col.name(), col.typeName(), s.codePointCount(0, s.length())));
+        }
+        return value;
+    }
+
     private LocalDateTime parseTimestamp(String s, String colName) {
         try {
             return TimestampParser.parse(s);
@@ -796,7 +806,7 @@ public final class StatementExecutor {
                 for (ColumnDef c : t.getSchema().columns()) {
                     java.util.LinkedHashMap<String, Object> v = new java.util.LinkedHashMap<>();
                     v.put("column_name", c.name());
-                    v.put("data_type", c.dataType().name());
+                    v.put("data_type", c.typeName());
                     rows.add(new Row(v));
                 }
                 return new QueryResult(rows, 0, List.of("column_name", "data_type"));
