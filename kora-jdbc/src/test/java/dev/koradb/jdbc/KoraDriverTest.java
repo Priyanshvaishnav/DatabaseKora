@@ -31,8 +31,8 @@ class KoraDriverTest {
     @DisplayName("Should report correct driver metadata")
     void testDriverMetadata() {
         KoraDriver driver = new KoraDriver();
-        assertThat(driver.getMajorVersion()).isEqualTo(0);
-        assertThat(driver.getMinorVersion()).isEqualTo(1);
+        assertThat(driver.getMajorVersion()).isEqualTo(2);
+        assertThat(driver.getMinorVersion()).isEqualTo(0);
         assertThat(driver.jdbcCompliant()).isFalse();
     }
 }

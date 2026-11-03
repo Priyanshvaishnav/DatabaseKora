@@ -89,6 +89,21 @@ class ReplicaSchemaRegressionTest {
         return replicaDb.getCatalog().getIndex(name).orElseThrow(() -> new AssertionError("no index " + name + " on replica"));
     }
 
+    @Test
+    @DisplayName("VARCHAR(n) reaches the replica, and a promoted replica enforces it")
+    void varcharLengthReachesTheReplica() throws Exception {
+        startReplica();
+        primary.execute("CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(3) NOT NULL)");
+        primary.execute("ALTER TABLE t ADD COLUMN city VARCHAR(2)");
+        primary.execute("INSERT INTO t VALUES (1, 'abc', 'NY')");
+        awaitCatchUp();
+        replica.promote();
+        replicaDb.execute("INSERT INTO t VALUES (2, 'xyz', 'LA')");
+        assertThatThrownBy(() -> replicaDb.execute("INSERT INTO t VALUES (3, 'abcd', 'LA')")).hasMessageContaining("too long");
+        assertThatThrownBy(() -> replicaDb.execute("INSERT INTO t VALUES (4, 'abc', 'LAX')")).hasMessageContaining("too long");
+        assertThat(count(replicaDb, "SELECT COUNT(*) FROM t")).isEqualTo(2);
+    }
+
     private String plan(KoraDB db, String sql) {
         return db.execute("EXPLAIN " + sql).toDisplayString();
     }

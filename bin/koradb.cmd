@@ -59,7 +59,7 @@ shift
 goto :eof
 
 :do_version
-echo KoraDB v0.1.0-SNAPSHOT (Java 21)
+echo KoraDB v2.0.1 (Java 21)
 goto :eof
 goto :eof
 

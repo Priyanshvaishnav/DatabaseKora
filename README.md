@@ -103,10 +103,10 @@ Run KoraDB immediately without installing Java:
 
 ```bash
 # Start standalone server
-docker run -d -p 8765:8765 --name koradb ghcr.io/priyanshvaishnav/koradb:latest
+docker run -d -p 8765:8765 --name koradb ghcr.io/priyanshvaishnav/databasekora:latest
 
 # Connect with the interactive CLI
-docker run -it --rm --network host ghcr.io/priyanshvaishnav/koradb:latest cli
+docker run -it --rm --network host ghcr.io/priyanshvaishnav/databasekora:latest cli
 ```
 
 Or spin up a high-availability cluster with replication, Prometheus, and Grafana:

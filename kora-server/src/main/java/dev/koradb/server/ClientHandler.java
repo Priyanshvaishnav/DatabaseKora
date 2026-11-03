@@ -93,7 +93,7 @@ public final class ClientHandler implements Runnable, AutoCloseable {
             }
 
             ProtocolCodec.writeMessage(out, new ConnectOkMessage(
-                    "KoraDB/0.1.0-SNAPSHOT",
+                    "KoraDB/2.0.1",
                     connectionId,
                     "Connected to KoraDB server"
             ));
@@ -172,7 +172,7 @@ public final class ClientHandler implements Runnable, AutoCloseable {
                 var table = session.getCatalog().getDatabase(activeDb.get()).getTable(tableName);
                 List<List<Object>> rows = new ArrayList<>();
                 for (var col : table.getSchema().columns()) {
-                    rows.add(List.of(col.name(), col.dataType().name()));
+                    rows.add(List.of(col.name(), col.typeName()));
                 }
                 ProtocolCodec.writeMessage(out, QueryResultMessage.rows(List.of("column_name", "data_type"), rows));
                 return;

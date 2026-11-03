@@ -2,8 +2,8 @@ apiVersion: v2
 name: koradb
 description: A production Helm chart for deploying KoraDB relational database engine with streaming replication and observability.
 type: application
-version: 0.1.0
-appVersion: "0.1.0-SNAPSHOT"
+version: 2.0.1
+appVersion: "2.0.1"
 keywords:
   - database
   - relational

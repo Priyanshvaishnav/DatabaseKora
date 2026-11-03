@@ -4,7 +4,7 @@ package dev.koradb.protocol;
  * Client connection initiation message.
  *
  * @param protocolVersion wire protocol version (e.g. 1)
- * @param clientName      client identification string (e.g. "KoraCLI/0.1.0")
+ * @param clientName      client identification string (e.g. "KoraCLI/2.0.1")
  * @param database        default database to connect to (empty string if none)
  * @param user            user name (empty if none); sent after {@code database}, so older peers ignore it
  * @param password        password (empty if none)
