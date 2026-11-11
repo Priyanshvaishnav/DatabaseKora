@@ -460,11 +460,11 @@ kora-db/
 
 | Document | Description |
 |---|---|
-| [Architecture](docs/architecture.md) | Full system architecture and pipeline |
+| [Architecture](#architecture-overview) | Full system architecture and pipeline |
 | [SQL Engine](docs/sql-engine.md) | Lexer, Parser, AST design |
-| [Storage Engine](docs/storage-engine.md) | Pages, records, disk layout ← Phase 2 |
-| [Buffer Pool](docs/buffer-pool.md) | Page caching and eviction ← Phase 3 |
-| [B+ Tree](docs/btree.md) | Index structure and operations ← Phase 4 |
+| [Storage Engine](kora-core/src/main/java/dev/koradb/storage) | Pages, records, disk layout ← Phase 2 (source code; no separate doc yet) |
+| [Buffer Pool](kora-core/src/main/java/dev/koradb/buffer) | Page caching and eviction ← Phase 3 (source code; no separate doc yet) |
+| [B+ Tree](docs/bplus-tree-index.md) | Index structure and operations ← Phase 4 |
 | [Query Planner](docs/query-planner.md) | Logical and physical planning ← Phase 6 |
 | [Transactions](docs/transactions.md) | BEGIN/COMMIT/ROLLBACK ← Phase 7 |
 | [WAL](docs/wal.md) | Write-Ahead Logging ← Phase 8 |
