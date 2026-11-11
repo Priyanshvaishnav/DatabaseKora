@@ -67,7 +67,7 @@ Relational databases require users and developers to master Structured Query Lan
 
 ## 3. Multi-Provider LLM Abstraction
 
-To avoid bloating the engine classpath with massive cloud SDKs or Jackson/Gson transitive trees, `kora-ai` features a handcrafted, high-performance recursive-descent JSON parser and serializer ([`SimpleJson`](file:///d:/Projects/DB/kora-db/kora-ai/src/main/java/dev/koradb/ai/util/SimpleJson.java)) and utilizes native Java 21 `java.net.http.HttpClient` with Project Loom Virtual Threads.
+To avoid bloating the engine classpath with massive cloud SDKs or Jackson/Gson transitive trees, `kora-ai` features a handcrafted, high-performance recursive-descent JSON parser and serializer ([`SimpleJson`](../kora-ai/src/main/java/dev/koradb/ai/util/SimpleJson.java)) and utilizes native Java 21 `java.net.http.HttpClient` with Project Loom Virtual Threads.
 
 ### Supported Providers
 
@@ -99,14 +99,14 @@ LlmClient ollama = LlmClientFactory.create("openai", Map.of(
 ## 4. Grounded Prompt Engineering & Self-Healing Verification
 
 ### Dialect Rules Injection
-Large Language Models trained on open-source code often produce SQL syntax specific to PostgreSQL, MySQL, or SQLite. KoraDB's SQL compiler enforces a lean, performant ANSI SQL subset. To prevent invalid queries before they reach the parser, [`DialectRules`](file:///d:/Projects/DB/kora-db/kora-ai/src/main/java/dev/koradb/ai/prompt/DialectRules.java) grounds every LLM prompt with KoraDB-specific constraints:
+Large Language Models trained on open-source code often produce SQL syntax specific to PostgreSQL, MySQL, or SQLite. KoraDB's SQL compiler enforces a lean, performant ANSI SQL subset. To prevent invalid queries before they reach the parser, [`DialectRules`](../kora-ai/src/main/java/dev/koradb/ai/prompt/DialectRules.java) grounds every LLM prompt with KoraDB-specific constraints:
 - Supported statements: `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `CREATE TABLE`, `ALTER TABLE ADD COLUMN`, `CREATE INDEX`, `DROP TABLE`.
 - Expressions: arithmetic, comparisons (`=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`), `AND`, `OR`, `NOT`, `LIKE`, `IN`, `BETWEEN`, `IS [NOT] NULL`, uncorrelated subqueries.
 - Aggregates: `COUNT(*)`, `SUM(col)`, `AVG(col)`, `MIN(col)`, `MAX(col)`, with `GROUP BY` on several columns and `HAVING`.
 - Joins: `[INNER] JOIN` and `LEFT JOIN`, with table aliases. Not supported: other SQL functions, `RIGHT`/`FULL` joins, and `INSERT ... SELECT`.
 
 ### 1-Shot Self-Healing Feedback Loop
-When translating natural language into SQL, the [`SqlGenerator`](file:///d:/Projects/DB/kora-db/kora-ai/src/main/java/dev/koradb/ai/engine/SqlGenerator.java) executes a real-time verification step using KoraDB's internal [`Parser`](file:///d:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/core/parser/Parser.java):
+When translating natural language into SQL, the [`SqlGenerator`](../kora-ai/src/main/java/dev/koradb/ai/engine/SqlGenerator.java) executes a real-time verification step using KoraDB's internal [`Parser`](../kora-core/src/main/java/dev/koradb/sql/parser/Parser.java):
 1. **Initial Translation**: The prompt is sent to the LLM alongside table schemas and dialect rules.
 2. **Local AST Verification**: The generated SQL is compiled via `new Parser(new Lexer(rawSql)).parse()`.
 3. **Self-Healing Correction**: If the parser throws a `ParseException`, `SqlGenerator` captures the exact error message and token offset, crafts a self-healing diagnostic prompt (`"The generated query failed KoraDB validation: <error>. Fix the SQL to be compliant with KoraDB dialect"`), and requests a corrected query from the LLM.
@@ -116,13 +116,13 @@ When translating natural language into SQL, the [`SqlGenerator`](file:///d:/Proj
 
 ## 5. Query Explainer & Optimization Advisor
 
-### Query Explainer ([`QueryExplainer`](file:///d:/Projects/DB/kora-db/kora-ai/src/main/java/dev/koradb/ai/engine/QueryExplainer.java))
+### Query Explainer ([`QueryExplainer`](../kora-ai/src/main/java/dev/koradb/ai/engine/QueryExplainer.java))
 Translates complex SQL queries and operator execution trees into clear, human-readable explanations detailing:
 - The high-level intent of the query.
 - Step-by-step physical execution breakdown (table scan, filter predicates, projection, sorting, limits).
 - Tables and columns accessed.
 
-### Optimization Advisor ([`OptimizationAdvisor`](file:///d:/Projects/DB/kora-db/kora-ai/src/main/java/dev/koradb/ai/engine/OptimizationAdvisor.java))
+### Optimization Advisor ([`OptimizationAdvisor`](../kora-ai/src/main/java/dev/koradb/ai/engine/OptimizationAdvisor.java))
 Analyzes queries against the current database schema to identify performance bottlenecks:
 - **Missing Index Detection**: Detects filter columns (`WHERE age > 30`, `WHERE status = 'ACTIVE'`) that would cause sequential full table scans ($O(N)$).
 - **Index Awareness**: Cross-references existing B+ Tree indexes from the schema catalog to prevent redundant `CREATE INDEX` recommendations.
@@ -205,7 +205,7 @@ Switched AI provider to: openai (model: gpt-4o)
 
 ## 7. Programmatic Java API
 
-Applications can consume the AI engine directly via the fluid [`KoraAi`](file:///d:/Projects/DB/kora-db/kora-ai/src/main/java/dev/koradb/ai/KoraAi.java) facade:
+Applications can consume the AI engine directly via the fluid [`KoraAi`](../kora-ai/src/main/java/dev/koradb/ai/KoraAi.java) facade:
 
 ```java
 import dev.koradb.ai.KoraAi;

@@ -36,7 +36,7 @@ In early database architectures, queries are executed procedurally: full tables 
 
 ## 3. The `Operator` Interface
 
-All relational operators implement [`dev.koradb.execution.operator.Operator`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/execution/operator/Operator.java):
+All relational operators implement [`dev.koradb.execution.operator.Operator`](../kora-core/src/main/java/dev/koradb/execution/operator/Operator.java):
 
 ```java
 public interface Operator extends AutoCloseable {
@@ -57,34 +57,34 @@ public interface Operator extends AutoCloseable {
 ## 4. Relational Operators
 
 ### 4.1 Scan Operators
-- **`SeqScanOperator`** ([`SeqScanOperator.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/execution/operator/SeqScanOperator.java)):
+- **`SeqScanOperator`** ([`SeqScanOperator.java`](../kora-core/src/main/java/dev/koradb/execution/operator/SeqScanOperator.java)):
   - Iterates over live rows in a table (both disk-backed `DiskTable` and in-memory tables).
   - Populates tuples with both unqualified and table-prefixed keys (e.g. `users.id` and `id`) to support multi-table disambiguation.
-- **`IndexScanOperator`** ([`IndexScanOperator.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/execution/operator/IndexScanOperator.java)):
+- **`IndexScanOperator`** ([`IndexScanOperator.java`](../kora-core/src/main/java/dev/koradb/execution/operator/IndexScanOperator.java)):
   - Uses a B+ Tree index for point lookups ($O(\log N)$) or range scans.
   - Streams matching `RecordId`s, fetching tuples from `TableFile` on demand.
 
 ### 4.2 Selection & Transformation
-- **`FilterOperator`** ([`FilterOperator.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/execution/operator/FilterOperator.java)):
+- **`FilterOperator`** ([`FilterOperator.java`](../kora-core/src/main/java/dev/koradb/execution/operator/FilterOperator.java)):
   - Evaluates `WHERE` predicates against tuples from its child operator using `ExpressionEvaluator`.
   - Discards non-matching tuples and yields matching tuples one-by-one.
-- **`ProjectOperator`** ([`ProjectOperator.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/execution/operator/ProjectOperator.java)):
+- **`ProjectOperator`** ([`ProjectOperator.java`](../kora-core/src/main/java/dev/koradb/execution/operator/ProjectOperator.java)):
   - Evaluates projection expressions, renaming output fields according to aliases (`AS alias`).
 
 ### 4.3 Pipelined Pagination & Sorting
-- **`LimitOperator`** ([`LimitOperator.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/execution/operator/LimitOperator.java)):
+- **`LimitOperator`** ([`LimitOperator.java`](../kora-core/src/main/java/dev/koradb/execution/operator/LimitOperator.java)):
   - Skips `offset` tuples, yields up to `limit` tuples, then stops pulling from the child operator immediately (early termination).
-- **`SortOperator`** ([`SortOperator.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/execution/operator/SortOperator.java)):
+- **`SortOperator`** ([`SortOperator.java`](../kora-core/src/main/java/dev/koradb/execution/operator/SortOperator.java)):
   - Materializes child tuples during `open()`, sorts them according to one or more sort criteria (`ASC`/`DESC`), with typed comparison and NULLs-last handling. Emits sorted tuples in `next()`.
 
 ### 4.4 Join Operators
-- **`NestedLoopJoinOperator`** ([`NestedLoopJoinOperator.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/execution/operator/NestedLoopJoinOperator.java)):
+- **`NestedLoopJoinOperator`** ([`NestedLoopJoinOperator.java`](../kora-core/src/main/java/dev/koradb/execution/operator/NestedLoopJoinOperator.java)):
   - General-purpose Cartesian / predicate join. For each outer tuple, resets and scans the inner operator, evaluating arbitrary join predicates.
-- **`HashJoinOperator`** ([`HashJoinOperator.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/execution/operator/HashJoinOperator.java)):
+- **`HashJoinOperator`** ([`HashJoinOperator.java`](../kora-core/src/main/java/dev/koradb/execution/operator/HashJoinOperator.java)):
   - High-performance equijoin ($O(N + M)$). Builds an in-memory hash index on the inner relation during `open()`, then probes it with outer relation tuples in `next()`.
 
 ### 4.5 Aggregations & Grouping
-- **`AggregateOperator`** ([`AggregateOperator.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/execution/operator/AggregateOperator.java)):
+- **`AggregateOperator`** ([`AggregateOperator.java`](../kora-core/src/main/java/dev/koradb/execution/operator/AggregateOperator.java)):
   - Supports standard SQL aggregate functions: `COUNT(*)`, `COUNT(col)`, `SUM(col)`, `AVG(col)`, `MIN(col)`, `MAX(col)`.
   - Supports bucketed aggregations via `GROUP BY <col>`.
 
@@ -101,7 +101,7 @@ The Lexer and Parser now support:
 - Aggregate functions: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` with optional `[AS] <alias>`.
 
 ### 5.2 Physical Plan Builder
-[`PhysicalPlanBuilder.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/execution/operator/PhysicalPlanBuilder.java) analyzes the parsed `SelectStmt` AST and constructs the optimized pipeline:
+[`PhysicalPlanBuilder.java`](../kora-core/src/main/java/dev/koradb/execution/operator/PhysicalPlanBuilder.java) analyzes the parsed `SelectStmt` AST and constructs the optimized pipeline:
 1. Picks `IndexScanOperator` if an equality or range predicate matches an available index, else `SeqScanOperator`.
 2. Stacks `JoinOperator` if a join clause is present.
 3. Stacks `FilterOperator` for any remaining unindexed predicates.

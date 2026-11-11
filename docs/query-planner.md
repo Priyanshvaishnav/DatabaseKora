@@ -52,7 +52,7 @@ In **Milestone 5**, KoraDB gained an execution engine based on Volcano iterator 
 
 ## 3. Logical Plan Representation
 
-All logical nodes implement [`dev.koradb.planner.logical.LogicalPlanNode`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/planner/logical/LogicalPlanNode.java):
+All logical nodes implement [`dev.koradb.planner.logical.LogicalPlanNode`](../kora-core/src/main/java/dev/koradb/planner/logical/LogicalPlanNode.java):
 - `getSchema()`: Output relational schema.
 - `getChildren()`: Sub-tree children.
 - `withChildren(...)`: Immutably copies the node with transformed children.
@@ -61,19 +61,19 @@ All logical nodes implement [`dev.koradb.planner.logical.LogicalPlanNode`](file:
 ### Logical Nodes
 | Node | Relational Operation | Key Attributes |
 |---|---|---|
-| [`LogicalScan`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/planner/logical/LogicalScan.java) | Relation scan ($\sigma$) | `tableName`, `schema`, `projectedColumns`, `pushedPredicates` |
-| [`LogicalFilter`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/planner/logical/LogicalFilter.java) | Selection ($\sigma_p$) | `child`, `predicates` |
-| [`LogicalProject`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/planner/logical/LogicalProject.java) | Projection ($\pi$) | `child`, `projectItems` |
-| [`LogicalJoin`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/planner/logical/LogicalJoin.java) | Theta / Equi-join ($\bowtie$) | `left`, `right`, `onCondition`, `joinType` (`INNER`, `CROSS`) |
-| [`LogicalAggregate`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/planner/logical/LogicalAggregate.java) | Grouping & Aggregate ($\gamma$) | `child`, `selectItems`, `groupBy` |
-| [`LogicalSort`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/planner/logical/LogicalSort.java) | Ordering ($\tau$) | `child`, `orderItems` |
-| [`LogicalLimit`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/planner/logical/LogicalLimit.java) | Pagination | `child`, `limit`, `offset` |
+| [`LogicalScan`](../kora-core/src/main/java/dev/koradb/planner/logical/LogicalScan.java) | Relation scan ($\sigma$) | `tableName`, `schema`, `projectedColumns`, `pushedPredicates` |
+| [`LogicalFilter`](../kora-core/src/main/java/dev/koradb/planner/logical/LogicalFilter.java) | Selection ($\sigma_p$) | `child`, `predicates` |
+| [`LogicalProject`](../kora-core/src/main/java/dev/koradb/planner/logical/LogicalProject.java) | Projection ($\pi$) | `child`, `projectItems` |
+| [`LogicalJoin`](../kora-core/src/main/java/dev/koradb/planner/logical/LogicalJoin.java) | Theta / Equi-join ($\bowtie$) | `left`, `right`, `onCondition`, `joinType` (`INNER`, `CROSS`) |
+| [`LogicalAggregate`](../kora-core/src/main/java/dev/koradb/planner/logical/LogicalAggregate.java) | Grouping & Aggregate ($\gamma$) | `child`, `selectItems`, `groupBy` |
+| [`LogicalSort`](../kora-core/src/main/java/dev/koradb/planner/logical/LogicalSort.java) | Ordering ($\tau$) | `child`, `orderItems` |
+| [`LogicalLimit`](../kora-core/src/main/java/dev/koradb/planner/logical/LogicalLimit.java) | Pagination | `child`, `limit`, `offset` |
 
 ---
 
 ## 4. Rule-Based Optimizer (RBO)
 
-The [`RuleBasedOptimizer`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/planner/optimizer/RuleBasedOptimizer.java) coordinates sequential algebraic rewrite rules:
+The [`RuleBasedOptimizer`](../kora-core/src/main/java/dev/koradb/planner/optimizer/RuleBasedOptimizer.java) coordinates sequential algebraic rewrite rules:
 
 ### 4.1 Constant Folding (`ConstantFoldingRule`)
 - **Tautology Elimination**: Conditions like `WHERE 1 = 1` or `'a' = 'a'` are identified at compile-time and stripped from the filter. If all predicates evaluate to TRUE, the `LogicalFilter` node is removed entirely.
@@ -95,11 +95,11 @@ The [`RuleBasedOptimizer`](file:///D:/Projects/DB/kora-db/kora-core/src/main/jav
 ## 5. Catalog Statistics & Hardware Cost Model
 
 ### 5.1 Statistics
-- [`TableStatistics`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/catalog/TableStatistics.java): Tracks `rowCount`, `pageCount`, and column statistics.
-- [`ColumnStatistics`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/catalog/ColumnStatistics.java): Tracks distinct value count (`NDV`), `nullCount`, and min/max values.
+- [`TableStatistics`](../kora-core/src/main/java/dev/koradb/catalog/TableStatistics.java): Tracks `rowCount`, `pageCount`, and column statistics.
+- [`ColumnStatistics`](../kora-core/src/main/java/dev/koradb/catalog/ColumnStatistics.java): Tracks distinct value count (`NDV`), `nullCount`, and min/max values.
 
 ### 5.2 Calibrated Cost Model
-[`CostModel.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/planner/cost/CostModel.java) uses hardware-calibrated metrics:
+[`CostModel.java`](../kora-core/src/main/java/dev/koradb/planner/cost/CostModel.java) uses hardware-calibrated metrics:
 - **`PAGE_IO_COST = 1.0`**: Sequential read of a 4KB disk page.
 - **`RANDOM_PAGE_IO_COST = 4.0`**: Random seek read for unclustered B+ Tree RID lookups.
 - **`CPU_TUPLE_COST = 0.01`**: Per-tuple iteration and processing.
@@ -116,7 +116,7 @@ The [`RuleBasedOptimizer`](file:///D:/Projects/DB/kora-db/kora-core/src/main/jav
 
 ## 6. Physical Plan Generation & CBO Decisions
 
-[`PhysicalPlanner.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/planner/physical/PhysicalPlanner.java) converts optimized logical nodes into physical operators:
+[`PhysicalPlanner.java`](../kora-core/src/main/java/dev/koradb/planner/physical/PhysicalPlanner.java) converts optimized logical nodes into physical operators:
 
 1. **Access Path Selection (IndexScan vs. SeqScan)**:
    - For an equality predicate on an indexed column:
@@ -158,7 +158,7 @@ Actual rows: 2
 Execution time: 0.145 ms
 ```
 
-[`ProfilingOperator.java`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/planner/explain/ProfilingOperator.java) wraps physical operators to measure exact execution times and tuple counts without modifying underlying operator semantics.
+[`ProfilingOperator.java`](../kora-core/src/main/java/dev/koradb/planner/explain/ProfilingOperator.java) wraps physical operators to measure exact execution times and tuple counts without modifying underlying operator semantics.
 
 ---
 

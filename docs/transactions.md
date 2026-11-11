@@ -72,13 +72,13 @@ Upon `COMMIT` or `ROLLBACK`, `LockManager.releaseAll(TransactionId txnId)` atomi
 
 When a transaction modifies table rows, it records fine-grained compensatory actions onto its in-memory **Undo Stack**:
 
-- [`InsertUndoAction`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/transaction/undo/InsertUndoAction.java):
+- [`InsertUndoAction`](../kora-core/src/main/java/dev/koradb/transaction/undo/InsertUndoAction.java):
   - On rollback, removes the inserted row from the table.
   - For disk-backed tables (`DiskTable`), deletes the allocated slot in `TableFile` and deletes the corresponding key from all associated B+ Tree indexes.
-- [`UpdateUndoAction`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/transaction/undo/UpdateUndoAction.java):
+- [`UpdateUndoAction`](../kora-core/src/main/java/dev/koradb/transaction/undo/UpdateUndoAction.java):
   - Retains a snapshot of the row prior to the update.
   - On rollback, restores the original column values and synchronizes index entries.
-- [`DeleteUndoAction`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/transaction/undo/DeleteUndoAction.java):
+- [`DeleteUndoAction`](../kora-core/src/main/java/dev/koradb/transaction/undo/DeleteUndoAction.java):
   - Retains the deleted row.
   - On rollback, re-inserts the row into the table and updates all indexes.
 
@@ -117,7 +117,7 @@ $$T_1 \xrightarrow{\text{waits for}} T_2 \xrightarrow{\text{waits for}} T_1$$
 
 KoraDB employs **timeout-based deadlock detection**:
 - Every lock acquisition enforces a configurable timeout (default 2000ms, configurable via `LockManager.setDefaultTimeoutMs(long ms)`).
-- When a lock wait exceeds the deadline, [`DeadlockException`](file:///D:/Projects/DB/kora-db/kora-core/src/main/java/dev/koradb/transaction/lock/DeadlockException.java) is thrown.
+- When a lock wait exceeds the deadline, [`DeadlockException`](../kora-core/src/main/java/dev/koradb/transaction/lock/DeadlockException.java) is thrown.
 - The transaction manager catches the exception, aborts the victim transaction, applies all undo actions, and releases all its locks, breaking the circular wait and allowing other transactions to complete.
 
 ---
