@@ -45,7 +45,7 @@ class KoraCliTest {
 
         int exitCode = cli.start();
         assertThat(exitCode).isEqualTo(0);
-        assertThat(out.toString(StandardCharsets.UTF_8)).contains("KoraDB CLI v2.0.1");
+        assertThat(out.toString(StandardCharsets.UTF_8)).contains("KoraDB CLI v2.0.2");
     }
 
     @Test

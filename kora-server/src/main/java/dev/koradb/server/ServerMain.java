@@ -10,7 +10,7 @@ import org.slf4j.LoggerFactory;
 public final class ServerMain {
 
     private static final Logger log = LoggerFactory.getLogger(ServerMain.class);
-    public static final String VERSION = "2.0.1";
+    public static final String VERSION = "2.0.2";
 
     public static void main(String[] args) {
         for (String arg : args) {

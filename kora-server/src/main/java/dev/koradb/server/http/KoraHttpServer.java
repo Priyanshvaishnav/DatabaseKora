@@ -40,7 +40,7 @@ import java.util.concurrent.Executors;
 public final class KoraHttpServer implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(KoraHttpServer.class);
-    public static final String SERVER_VERSION = "2.0.1";
+    public static final String SERVER_VERSION = "2.0.2";
 
     private final KoraHttpConfig config;
     private final KoraDB db;

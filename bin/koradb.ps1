@@ -73,7 +73,7 @@ switch ($Command) {
         & $JavaCmd -jar $BenchJar $Remaining
     }
     { $_ -in "version", "-v", "--version" } {
-        Write-Host "KoraDB v2.0.1 (Java 21)"
+        Write-Host "KoraDB v2.0.2 (Java 21)"
     }
     { $_ -in "help", "-h", "--help" } {
         Show-Help
