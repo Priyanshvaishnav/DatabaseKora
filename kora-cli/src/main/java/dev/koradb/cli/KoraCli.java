@@ -38,7 +38,7 @@ public final class KoraCli {
             ██╔═██╗ ██║   ██║██╔══██╗██╔══██║██║  ██║██╔══██╗
             ██║  ██╗╚██████╔╝██║  ██║██║  ██║██████╔╝██████╔╝
             ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚═════╝\s
-            Welcome to KoraDB CLI (v2.0.1)
+            Welcome to KoraDB CLI (v2.0.2)
             Type \\h or \\help for help. Type \\q to exit.
             """;
 
@@ -60,7 +60,7 @@ public final class KoraCli {
             | ' // _ \\| '__/ _` || | | |  _ \\
             | . \\ (_) | | | (_| || |_| | |_) |
             |_|\\_\\___/|_|  \\__,_||____/|____/
-            Welcome to KoraDB CLI (v2.0.1)
+            Welcome to KoraDB CLI (v2.0.2)
             Type \\h or \\help for help. Type \\q to exit.
             """;
 
@@ -94,7 +94,7 @@ public final class KoraCli {
         }
 
         if (config.version()) {
-            out.println("KoraDB CLI v2.0.1");
+            out.println("KoraDB CLI v2.0.2");
             return 0;
         }
 

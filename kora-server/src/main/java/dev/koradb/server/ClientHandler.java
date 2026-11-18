@@ -93,7 +93,7 @@ public final class ClientHandler implements Runnable, AutoCloseable {
             }
 
             ProtocolCodec.writeMessage(out, new ConnectOkMessage(
-                    "KoraDB/2.0.1",
+                    "KoraDB/2.0.2",
                     connectionId,
                     "Connected to KoraDB server"
             ));

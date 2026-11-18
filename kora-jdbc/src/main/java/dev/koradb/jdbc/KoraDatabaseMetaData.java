@@ -45,11 +45,11 @@ public class KoraDatabaseMetaData implements DatabaseMetaData {
     @Override
     public String getDatabaseProductName() throws SQLException { return "KoraDB"; }
     @Override
-    public String getDatabaseProductVersion() throws SQLException { return "2.0.1"; }
+    public String getDatabaseProductVersion() throws SQLException { return "2.0.2"; }
     @Override
     public String getDriverName() throws SQLException { return "KoraDB JDBC Driver"; }
     @Override
-    public String getDriverVersion() throws SQLException { return "2.0.1"; }
+    public String getDriverVersion() throws SQLException { return "2.0.2"; }
     @Override
     public int getDriverMajorVersion() { return 2; }
     @Override
