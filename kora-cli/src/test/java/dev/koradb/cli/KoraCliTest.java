@@ -1,5 +1,9 @@
 package dev.koradb.cli;
 
+import dev.koradb.ai.engine.KoraAiEngine;
+import dev.koradb.ai.provider.LlmClient;
+import dev.koradb.ai.provider.LlmRequest;
+import dev.koradb.ai.provider.LlmResponse;
 import dev.koradb.server.KoraServer;
 import dev.koradb.server.KoraServerConfig;
 import org.junit.jupiter.api.AfterEach;
@@ -163,6 +167,90 @@ class KoraCliTest {
         assertThat(output).contains("Keyboard");
         assertThat(output).doesNotContain("Mouse");
         assertThat(output).contains("CREATE INDEX idx_items_price ON items (price);");
+    }
+
+    private static final String SHOP = """
+            CREATE DATABASE shop;
+            USE shop;
+            CREATE TABLE orders (id INT PRIMARY KEY, amount DOUBLE, status VARCHAR(20));
+            INSERT INTO orders VALUES (1, 250.0, 'pending'), (2, 90.5, 'shipped'), (3, 400.0, 'pending');
+            """;
+
+    /** Runs {@code script} in the REPL, optionally with {@code llm} as the AI provider, and returns the output. */
+    private String repl(String script, LlmClient llm) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        KoraCli cli = new KoraCli(CliConfig.parse(new String[]{"--port", String.valueOf(server.getPort())}),
+                new ByteArrayInputStream(script.getBytes(StandardCharsets.UTF_8)), new PrintStream(out));
+        if (llm != null) cli.setAiEngine(new KoraAiEngine(llm));
+        assertThat(cli.start()).isZero();
+        return out.toString(StandardCharsets.UTF_8);
+    }
+
+    @Test
+    @DisplayName("\\ai: a change the prompt asks for runs only after typing yes; Enter cancels it")
+    void aiChangesNeedYes() {
+        String output = repl(SHOP + """
+                \\ai delete all orders
+
+                SELECT COUNT(*) FROM orders;
+                \\ai delete all orders
+                yes
+                SELECT COUNT(*) AS left_over FROM orders;
+                \\q
+                """, null);
+
+        assertThat(output).contains("Generated SQL: DELETE FROM orders;");
+        assertThat(output).contains("This DELETE changes data. Type yes to run it:");
+        assertThat(output).contains("Execution cancelled.");
+        assertThat(output).containsPattern("COUNT\\(\\*\\)[\\s|+-]*3");     // still there after Enter
+        assertThat(output).containsPattern("left_over[\\s|+-]*0");          // gone after yes
+    }
+
+    @Test
+    @DisplayName("\\ai: a change the prompt does not ask for is never run, even when confirmed")
+    void aiMismatchedChangeIsRefused() {
+        LlmClient injected = new LlmClient() {
+            @Override public String getProviderName() { return "test"; }
+            @Override public String getModelName() { return "always-delete"; }
+            @Override public LlmResponse complete(LlmRequest request) {
+                return LlmResponse.of("DELETE FROM orders;", "always-delete", "test");
+            }
+        };
+        String output = repl(SHOP + """
+                \\ai how many orders are there
+                SELECT COUNT(*) FROM orders;
+                \\q
+                """, injected);
+
+        assertThat(output).contains("Generated SQL: DELETE FROM orders;");
+        assertThat(output).contains("Not executed: your request does not ask for a DELETE");
+        assertThat(output).doesNotContain("Type yes to run it").doesNotContain("Execution cancelled.");
+        assertThat(output).containsPattern("COUNT\\(\\*\\)[\\s|+-]*3");
+    }
+
+    @Test
+    @DisplayName("\\ai: column values reach the offline provider, so 'pending' becomes a filter")
+    void aiUsesColumnValues() {
+        String output = repl(SHOP + """
+                \\ai total amount of pending orders
+
+                \\q
+                """, null);
+
+        assertThat(output).contains("status = 'pending'");
+        assertThat(output).contains("650.0");
+    }
+
+    @Test
+    @DisplayName("\\ai: a translation that fails validation is shown but not run")
+    void aiInvalidTranslationIsNotRun() {
+        String output = repl(SHOP + """
+                \\ai show me the weather in paris
+                \\q
+                """, null);
+
+        assertThat(output).contains("Not executed:");
+        assertThat(output).doesNotContain("Execute query?");
     }
 }
 

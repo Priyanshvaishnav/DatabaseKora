@@ -1,9 +1,11 @@
 package dev.koradb.cli;
 
 import dev.koradb.ai.engine.KoraAiEngine;
+import dev.koradb.ai.engine.SqlSafety;
 import dev.koradb.ai.model.ExplanationResult;
 import dev.koradb.ai.model.OptimizationReport;
 import dev.koradb.ai.model.TranslationResult;
+import dev.koradb.ai.provider.RuleBasedLlmClient;
 import dev.koradb.ai.schema.DatabaseSchema;
 import dev.koradb.ai.schema.SchemaExtractor;
 import dev.koradb.client.ClientQueryResult;
@@ -11,6 +13,7 @@ import dev.koradb.client.KoraClient;
 import dev.koradb.client.KoraClientException;
 import dev.koradb.sql.ast.ColumnDef;
 import dev.koradb.sql.ast.DataType;
+import dev.koradb.sql.ast.Statement;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -44,6 +47,11 @@ public final class KoraCli {
     private final PrintStream out;
     private String currentDatabase;
     private KoraAiEngine aiEngine = new KoraAiEngine();
+
+    /** For tests: the AI engine \ai and the other AI commands use. */
+    void setAiEngine(KoraAiEngine aiEngine) {
+        this.aiEngine = aiEngine;
+    }
 
     /** Banner for consoles whose character set cannot show the block characters (e.g. Windows code page 437/1252). */
     public static final String ASCII_BANNER = """
@@ -291,8 +299,17 @@ public final class KoraCli {
         return false;
     }
 
+    /**
+     * Translates {@code prompt} and runs the result with the same rules as {@code KoraAi.ask}: a read runs
+     * after a confirmation that defaults to yes; a change (INSERT/UPDATE/DELETE or DDL) runs only when the
+     * prompt asks for that kind of change and the user types "yes"; anything else is shown but not run.
+     */
     private void handleAiQuery(KoraClient client, String prompt) {
         DatabaseSchema schema = fetchDatabaseSchema(client);
+        // Sample column values are table data, so like KoraAi they go only to the offline provider by default.
+        if (aiEngine.getLlmClient() instanceof RuleBasedLlmClient) {
+            schema = SchemaExtractor.withSampleValues(schema, sql -> queryRows(client, sql), null);
+        }
         out.println("Translating with KoraDB AI (" + aiEngine.getActiveProvider() + ")...");
         TranslationResult tr = aiEngine.translate(prompt, schema);
 
@@ -301,21 +318,73 @@ public final class KoraCli {
         out.printf("Provider:      %s (%s) [%dms]%n", tr.provider(), tr.model(), tr.durationMillis());
 
         if (!tr.isValid()) {
-            out.println("Validation Warning: " + tr.errorMessage());
+            out.println("Not executed: " + tr.errorMessage());
+            return;
         }
+        Statement stmt;
+        try {
+            stmt = SqlSafety.parseSingle(tr.generatedSql());
+        } catch (RuntimeException e) {
+            out.println("Not executed: the generated SQL could not be parsed: " + e.getMessage());
+            return;
+        }
+        String verb = SqlSafety.verb(stmt);
+        boolean confirmed;
+        switch (SqlSafety.classify(stmt)) {
+            case READ -> {
+                String answer = ask("Execute query? [Y/n]: ");
+                confirmed = answer != null && (answer.isBlank() || answer.equalsIgnoreCase("y") || answer.equalsIgnoreCase("yes"));
+            }
+            case TRANSACTION -> {
+                out.println("Not executed: \\ai runs single statements and does not manage transactions.");
+                return;
+            }
+            default -> {        // WRITE, DDL
+                if (!SqlSafety.requestAsksFor(prompt, stmt)) {
+                    out.println("Not executed: your request does not ask for a " + verb
+                            + ", so the generated statement does not match it.");
+                    return;
+                }
+                String what = SqlSafety.classify(stmt) == SqlSafety.StatementKind.DDL ? "the schema" : "data";
+                confirmed = "yes".equalsIgnoreCase(ask("This " + verb + " changes " + what + ". Type yes to run it: "));
+            }
+        }
+        if (confirmed) {
+            executeSql(client, tr.generatedSql());
+        } else {
+            out.println("Execution cancelled.");
+        }
+    }
 
-        out.print("Execute query? [Y/n]: ");
+    /** Prints {@code question} and returns the trimmed answer, or null at end of input. */
+    private String ask(String question) {
+        out.print(question);
         out.flush();
         try {
             String answer = reader.readLine();
-            if (answer == null || answer.isBlank() || answer.trim().equalsIgnoreCase("y") || answer.trim().equalsIgnoreCase("yes")) {
-                executeSql(client, tr.generatedSql());
-            } else {
-                out.println("Execution cancelled.");
-            }
+            return answer != null ? answer.trim() : null;
         } catch (IOException e) {
-            out.println("Cancelled.");
+            return null;
         }
+    }
+
+    /** Runs a SELECT and returns its rows as column name to value. */
+    private static List<Map<String, Object>> queryRows(KoraClient client, String sql) {
+        ClientQueryResult res;
+        try {
+            res = client.execute(sql);
+        } catch (KoraClientException e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        }
+        List<Map<String, Object>> rows = new ArrayList<>(res.rows().size());
+        for (List<Object> row : res.rows()) {
+            Map<String, Object> values = new LinkedHashMap<>();
+            for (int i = 0; i < res.columns().size() && i < row.size(); i++) {
+                values.put(res.columns().get(i), row.get(i));
+            }
+            rows.add(values);
+        }
+        return rows;
     }
 
     private void handleAiExplain(KoraClient client, String sql) {
@@ -378,7 +447,8 @@ public final class KoraCli {
                   \\c   <db_name>        Connect to / use database
                   \\c                    Clear the current multi-line query buffer
                   \\s,  \\status          Display server and connection status
-                  \\ai  <prompt>         Natural language query (ask AI and execute)
+                  \\ai  <prompt>         Natural language query: shows the SQL, runs reads on Enter,
+                                         changes only when asked for and confirmed with "yes"
                   \\explain-ai <sql>     Explain query plan in plain English
                   \\advisor <sql>        Analyze query and recommend B+ Tree indexes
                   \\ai-provider [name]   Display or switch active AI provider

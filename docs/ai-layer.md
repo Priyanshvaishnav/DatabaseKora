@@ -139,7 +139,14 @@ Analyzes queries against the current database schema to identify performance bot
 The KoraDB REPL CLI includes built-in AI meta-commands:
 
 ### `\ai <prompt>`
-Translates a natural language question into SQL, validates it against KoraDB parser, prints the translation summary, and prompts for immediate execution:
+Translates a natural language question into SQL, validates it against the parser and the schema, and prints the generated SQL. What happens next follows the same rules as `ask()`:
+
+- **Reads** (`SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`) run after `Execute query? [Y/n]`, where Enter means yes.
+- **Changes** (`INSERT`, `UPDATE`, `DELETE`, `TRUNCATE` and DDL) run only when your request asks for that kind of change ("delete", "add", "drop", ...) and you type `yes`. Enter cancels.
+- **Anything else** is shown but not run: a translation that fails validation, a change your request doesn't ask for (a wrong guess or a prompt injection), and `BEGIN` / `COMMIT` / `ROLLBACK`.
+
+With the offline provider, the CLI also gives the AI a few values of short text columns, so "pending orders" becomes `WHERE status = 'pending'`. Remote providers don't get them, because they are table data.
+
 ```
 kora [shop]> \ai show all products priced over 50
 Translating with KoraDB AI (rule-based)...

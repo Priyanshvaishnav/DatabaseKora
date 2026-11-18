@@ -93,7 +93,19 @@ public final class SchemaExtractor {
      */
     public static DatabaseSchema withSampleValues(DatabaseSchema schema, dev.koradb.KoraDB db,
                                                   Map<String, CachedSamples> cache) {
-        if (schema == null || db == null) return schema;
+        if (db == null) return schema;
+        return withSampleValues(schema, sql -> db.execute(sql).rows().stream().map(dev.koradb.catalog.Row::values).toList(), cache);
+    }
+
+    /**
+     * Same as {@link #withSampleValues(DatabaseSchema, dev.koradb.KoraDB, Map)}, for callers that reach the
+     * database another way (the CLI, over the network): {@code query} runs a SELECT and returns its rows
+     * as column name to value.
+     */
+    public static DatabaseSchema withSampleValues(DatabaseSchema schema,
+                                                  java.util.function.Function<String, List<Map<String, Object>>> query,
+                                                  Map<String, CachedSamples> cache) {
+        if (schema == null || query == null) return schema;
         Map<String, List<String>> all = new LinkedHashMap<>();
         long now = System.currentTimeMillis();
         for (TableSchema ts : schema.tables().values()) {
@@ -104,7 +116,7 @@ public final class SchemaExtractor {
             String key = (schema.databaseName() + "." + ts.tableName()).toLowerCase();
             CachedSamples cached = cache != null ? cache.get(key) : null;
             if (cached == null || now - cached.takenAtMillis() > SAMPLE_TTL_MILLIS) {
-                cached = new CachedSamples(now, sample(db, ts.tableName(), textCols));
+                cached = new CachedSamples(now, sample(query, ts.tableName(), textCols));
                 if (cache != null) cache.put(key, cached);
             }
             all.putAll(cached.values());
@@ -112,18 +124,19 @@ public final class SchemaExtractor {
         return new DatabaseSchema(schema.databaseName(), schema.tables(), all);
     }
 
-    private static Map<String, List<String>> sample(dev.koradb.KoraDB db, String table, List<String> cols) {
+    private static Map<String, List<String>> sample(java.util.function.Function<String, List<Map<String, Object>>> query,
+                                                    String table, List<String> cols) {
         Map<String, List<String>> out = new LinkedHashMap<>();
-        dev.koradb.execution.QueryResult qr;
+        List<Map<String, Object>> rows;
         try {
-            qr = db.execute("SELECT " + String.join(", ", cols) + " FROM " + table + " LIMIT " + SAMPLE_ROWS);
+            rows = query.apply("SELECT " + String.join(", ", cols) + " FROM " + table + " LIMIT " + SAMPLE_ROWS);
         } catch (RuntimeException e) {
             return out;   // samples are an optional hint
         }
         for (String col : cols) {
             Map<String, Integer> counts = new LinkedHashMap<>();
             boolean tooMany = false;
-            for (dev.koradb.catalog.Row r : qr.rows()) {
+            for (Map<String, Object> r : rows) {
                 Object v = r.get(col);
                 if (!(v instanceof String str) || str.isBlank() || str.length() > MAX_VALUE_LENGTH) continue;
                 counts.merge(str, 1, Integer::sum);
@@ -131,7 +144,7 @@ public final class SchemaExtractor {
             }
             if (tooMany || counts.isEmpty()) continue;
             // a column whose values are all distinct (names, emails) is not categorical
-            if (counts.size() > 1 && counts.size() == qr.rows().size() && qr.rows().size() > 5) continue;
+            if (counts.size() > 1 && counts.size() == rows.size() && rows.size() > 5) continue;
             List<String> vals = new ArrayList<>(counts.keySet());
             vals.sort((a, b) -> Integer.compare(counts.get(b), counts.get(a)));
             out.put((table + "." + col).toLowerCase(), vals);
