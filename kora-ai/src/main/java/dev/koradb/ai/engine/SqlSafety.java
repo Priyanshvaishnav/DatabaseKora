@@ -62,6 +62,29 @@ public final class SqlSafety {
     }
 
     /**
+     * Whether {@code prompt} asks for the kind of change {@code stmt} makes (a DELETE needs "delete",
+     * "remove", ...), so an LLM answer that does not match the request (a wrong guess or a prompt
+     * injection) is not executed. Only meaningful for statements that are not {@link StatementKind#READ}.
+     */
+    public static boolean requestAsksFor(String prompt, Statement stmt) {
+        java.util.Set<String> words = new java.util.HashSet<>(java.util.Arrays.asList(
+                prompt.toLowerCase(Locale.ROOT).split("[^a-z]+")));
+        List<String> needed = switch (stmt) {
+            case DeleteStmt s -> List.of("delete", "remove", "erase", "purge", "clear");
+            case TruncateStmt s -> List.of("truncate", "delete", "remove", "empty", "clear", "purge");
+            case AlterTableStmt s -> List.of("alter", "add", "column");
+            case UpdateStmt s -> List.of("update", "set", "change", "modify", "mark", "rename");
+            case InsertStmt s -> List.of("insert", "add", "create", "record", "register", "new");
+            case DropTableStmt s -> List.of("drop", "delete", "remove");
+            case DropIndexStmt s -> List.of("drop", "delete", "remove");
+            case DropDatabaseStmt s -> List.of("drop", "delete", "remove");
+            case UseDatabaseStmt s -> List.of("use", "switch");
+            default -> List.of("create", "add", "make", "new", "build");
+        };
+        return needed.stream().anyMatch(words::contains);
+    }
+
+    /**
      * Checks that the tables and columns a statement refers to exist in {@code schema}.
      *
      * @return null when everything resolves (or no schema is known), else a message naming what is missing
